@@ -1,12 +1,10 @@
-# BoilerBus
+# BoilerBus ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 A Progressive Web App (PWA) for real-time Purdue University bus tracking. View nearby stops, live ETAs, bus locations on an interactive map, and get walking directions.
 
 I really dislike the official bus app, so I decided to make my own. The API endpoints for bus tracking and route info don't require any authentication to poll and I was able to figure it out with some poking. It seemed to me like they intentionally designed it to be as confusing and slow to navigate as possible, and I really hated how you had to use your Purdue login just to see where the bus is. 
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
-
-> **Disclaimer:** This project is NOT-AFFILIATED with or sponsored by Purdue University, CityBus, or Liftango.
+> **Disclaimer:** This project is **NOT-AFFILIATED** with or sponsored by Purdue University, CityBus, or Liftango.
 
 ## 📱 Install as App
 
@@ -37,7 +35,7 @@ If you'd like to make your own project that pulls data from Purdue's campus tran
 
 ## Development/Self-Hosting Quick Start
 
-### 1. Deploy the CORS Proxy (Required)
+### 1. Deploy the CORS Proxy
 
 The Liftango API doesn't allow cross-origin requests, so you need a proxy. Cloudflare Workers offers a generous free tier (100k requests/day).
 
@@ -55,8 +53,7 @@ To protect your proxy from abuse:
 1. In your worker, go to **Settings** > **Variables**
 2. Click **Add binding** under Rate Limiting
 3. Name: `RATE_LIMITER`
-4. Configure: 100 requests per 60 seconds
-5. Save
+4. Configure your rate limit settings
 
 ### 2. Configure the App
 

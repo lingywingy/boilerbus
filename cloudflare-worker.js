@@ -1,36 +1,5 @@
-/**
- * BoilerBus CORS Proxy - Cloudflare Worker
- *
- * This worker proxies requests to the Liftango API, adding CORS headers
- * so the PWA can access the API from any domain.
- *
- * DEPLOYMENT INSTRUCTIONS:
- *
- * 1. Go to https://dash.cloudflare.com/
- * 2. Navigate to Workers & Pages > Create application > Create Worker
- * 3. Name your worker (e.g., "purdue-transit-proxy")
- * 4. Replace the default code with this file's contents
- * 5. Click "Deploy"
- *
- * OPTIONAL: Enable Rate Limiting (Recommended)
- *
- * To add Cloudflare's distributed rate limiting:
- * 1. In your worker's dashboard, go to Settings > Bindings
- * 2. Click "Add" under "Rate Limiting"
- * 3. Set the variable name to: RATE_LIMITER
- * 4. Configure the limit:
- *    - Limit: 150 requests
- *    - Period: 60 seconds (only 10 or 60 are allowed)
- * 5. Click "Deploy" to apply changes
- *
- * Without this binding, the worker uses in-memory rate limiting
- * which resets on restarts and doesn't sync across edge locations.
- *
- * Your worker URL will be: https://your-worker-name.your-subdomain.workers.dev
- */
 
-// Liftango API base URL
-const LIFTANGO_API = 'https://hailer-odb-prod.liftango.com';
+// Liftango API base URconst LIFTANGO_API = 'https://hailer-odb-prod.liftango.com';
 
 // Allowed origins (add your domains here, or use '*' for public access)
 const ALLOWED_ORIGINS = [
