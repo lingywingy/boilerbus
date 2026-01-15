@@ -1,9 +1,8 @@
 /**
  * BoilerBus - Service Worker
- * Handles caching and offline support
+ * Handles caching for map tiles and static assets
  */
 
-const CACHE_NAME = 'purdue-transit-v3';
 const STATIC_CACHE = 'purdue-transit-static-v3';
 const DYNAMIC_CACHE = 'purdue-transit-dynamic-v3';
 
@@ -14,15 +13,13 @@ const STATIC_ASSETS = [
     '/styles.css',
     '/config.js',
     '/app.js',
+    '/welcome.js',
     '/manifest.json',
-    'https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap',
-    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
 ];
 
-// API endpoints that should NEVER be cached and always go to network
+// API endpoints that should NEVER be cached (real-time data)
 const API_PATTERNS = [
-    /\/api\//,  // Our proxy API endpoint
+    /\/api\//,
     /hailer-odb-prod\.liftango\.com/,
     /nominatim\.openstreetmap\.org/,
 ];
@@ -36,10 +33,7 @@ const TILE_PATTERNS = [
 self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(STATIC_CACHE)
-            .then((cache) => {
-                console.log('Caching static assets');
-                return cache.addAll(STATIC_ASSETS.filter(url => !url.startsWith('http')));
-            })
+            .then((cache) => cache.addAll(STATIC_ASSETS))
             .then(() => self.skipWaiting())
     );
 });
@@ -73,24 +67,18 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Map tiles - cache first (tiles don't change often)
+    // Map tiles - cache first (tiles don't change)
     if (TILE_PATTERNS.some(pattern => pattern.test(url.href))) {
-        event.respondWith(cacheFirst(request, DYNAMIC_CACHE));
+        event.respondWith(cacheFirst(request));
         return;
     }
 
-    // Static assets - stale while revalidate (allows updates to propagate)
-    if (url.origin === location.origin) {
-        event.respondWith(staleWhileRevalidate(request));
-        return;
-    }
-
-    // External resources - stale while revalidate
+    // Static assets and external resources - stale while revalidate
     event.respondWith(staleWhileRevalidate(request));
 });
 
 /**
- * Network-only strategy (for API requests - no caching)
+ * Network-only strategy (for API requests)
  */
 async function networkOnly(request) {
     try {
@@ -104,16 +92,16 @@ async function networkOnly(request) {
 }
 
 /**
- * Cache-first strategy
+ * Cache-first strategy (for map tiles)
  */
-async function cacheFirst(request, cacheName) {
+async function cacheFirst(request) {
     const cached = await caches.match(request);
     if (cached) return cached;
 
     try {
         const response = await fetch(request);
         if (response.ok) {
-            const cache = await caches.open(cacheName);
+            const cache = await caches.open(DYNAMIC_CACHE);
             cache.put(request, response.clone());
         }
         return response;
@@ -123,35 +111,7 @@ async function cacheFirst(request, cacheName) {
 }
 
 /**
- * Network-first strategy with timeout
- */
-async function networkFirst(request, timeoutSeconds = 5) {
-    const cache = await caches.open(DYNAMIC_CACHE);
-    
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
-        
-        const response = await fetch(request, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        
-        if (response.ok) {
-            cache.put(request, response.clone());
-        }
-        return response;
-    } catch {
-        const cached = await cache.match(request);
-        if (cached) return cached;
-        
-        return new Response(JSON.stringify({ error: 'Offline' }), {
-            status: 503,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-}
-
-/**
- * Stale-while-revalidate strategy
+ * Stale-while-revalidate strategy (for static assets)
  */
 async function staleWhileRevalidate(request) {
     const cache = await caches.open(DYNAMIC_CACHE);
@@ -168,60 +128,3 @@ async function staleWhileRevalidate(request) {
 
     return cached || fetchPromise;
 }
-
-// Handle background sync for offline actions
-self.addEventListener('sync', (event) => {
-    if (event.tag === 'sync-favorites') {
-        event.waitUntil(syncFavorites());
-    }
-});
-
-async function syncFavorites() {
-    // Future: sync favorite stops when back online
-    console.log('Syncing favorites...');
-}
-
-// Push notifications (for future bus alerts)
-self.addEventListener('push', (event) => {
-    if (!event.data) return;
-
-    const data = event.data.json();
-    const options = {
-        body: data.body,
-        icon: '/icons/icon-192.png',
-        badge: '/icons/icon-72.png',
-        vibrate: [100, 50, 100],
-        data: {
-            url: data.url || '/',
-        },
-        actions: [
-            { action: 'open', title: 'Open' },
-            { action: 'dismiss', title: 'Dismiss' },
-        ],
-    };
-
-    event.waitUntil(
-        self.registration.showNotification(data.title || 'BoilerBus', options)
-    );
-});
-
-// Handle notification clicks
-self.addEventListener('notificationclick', (event) => {
-    event.notification.close();
-
-    if (event.action === 'dismiss') return;
-
-    event.waitUntil(
-        clients.matchAll({ type: 'window' })
-            .then((clientList) => {
-                for (const client of clientList) {
-                    if (client.url === event.notification.data.url && 'focus' in client) {
-                        return client.focus();
-                    }
-                }
-                if (clients.openWindow) {
-                    return clients.openWindow(event.notification.data.url);
-                }
-            })
-    );
-});
