@@ -39,15 +39,42 @@ class CORSProxyHandler(http.server.SimpleHTTPRequestHandler):
         # Log every request
         print(f"  >>> GET {self.path}")
         sys.stdout.flush()
-        
+
         if self.path.startswith('/api/'):
             self.proxy_api_request()
+        elif self.path == '/config.js' or self.path.startswith('/config.js?'):
+            self.serve_local_config()
         else:
             # Add CORS headers to static files too
             try:
                 super().do_GET()
             except Exception as e:
                 print(f"  [ERROR] Static file error: {e}")
+
+    def serve_local_config(self):
+        """Serve config.js with CORS_PROXY_URL set to empty for local development"""
+        try:
+            with open('config.js', 'r', encoding='utf-8') as f:
+                config_content = f.read()
+
+            # Replace the CORS_PROXY_URL value with empty string for local dev
+            import re
+            modified_config = re.sub(
+                r"CORS_PROXY_URL:\s*['\"][^'\"]*['\"]",
+                "CORS_PROXY_URL: ''",
+                config_content
+            )
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/javascript')
+            self.end_headers()
+            self.wfile.write(modified_config.encode('utf-8'))
+            print(f"  [CONFIG] Served local config (CORS_PROXY_URL cleared)")
+
+        except Exception as e:
+            print(f"  [ERROR] Config error: {e}")
+            self.send_response(500)
+            self.end_headers()
     
     def end_headers(self):
         """Add CORS headers to all responses"""

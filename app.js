@@ -46,6 +46,9 @@ const CONFIG = {
     BUS_AVG_SPEED_MPH: window.APP_CONFIG?.BUS_AVG_SPEED_MPH || 10,
     STOP_TIME_SECONDS: window.APP_CONFIG?.STOP_TIME_SECONDS || 50,
     TRAFFIC_BUFFER_PERCENT: window.APP_CONFIG?.TRAFFIC_BUFFER_PERCENT || 0.15,
+
+    // [DISABLED] Maximum ETA to display (minutes) - arrivals beyond this are considered "not running"
+    // MAX_DISPLAY_ETA_MINUTES: window.APP_CONFIG?.MAX_DISPLAY_ETA_MINUTES || 60,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1001,10 +1004,10 @@ function updateHeaderTitle(title) {
 // Nearby Stops View
 // ─────────────────────────────────────────────────────────────────────────────
 
-function renderNearbyStops() {
+async function renderNearbyStops() {
     const container = $('#stops-list');
     container.innerHTML = '';
-    
+
     if (state.nearbyStops.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
@@ -1019,12 +1022,19 @@ function renderNearbyStops() {
         `;
         return;
     }
-    
-    for (const stop of state.nearbyStops) {
-        const arrivals = getNextArrivalsForStop(stop.id);
+
+    // Fetch official ETAs for all nearby stops in parallel
+    const arrivalsPromises = state.nearbyStops.map(stop =>
+        fetchArrivalsForStop(stop.id).catch(() => getNextArrivalsForStop(stop.id))
+    );
+    const allArrivals = await Promise.all(arrivalsPromises);
+
+    // Render cards with official ETAs
+    state.nearbyStops.forEach((stop, index) => {
+        const arrivals = allArrivals[index];
         const card = createStopCard(stop, arrivals);
         container.appendChild(card);
-    }
+    });
 }
 
 /**
@@ -1075,9 +1085,9 @@ function createStopCard(stop, arrivals) {
     const card = document.createElement('div');
     card.className = 'stop-card';
     card.dataset.stopId = stop.id;
-    
+
     const distanceStr = formatDistance(stop.distance);
-    
+
     let arrivalsHtml = '';
     if (arrivals.length === 0) {
         arrivalsHtml = '<p class="no-arrivals">No buses currently en route</p>';
@@ -1183,7 +1193,7 @@ async function showStopDetail(stop) {
 
 function renderStopDetail(stop, arrivals) {
     const container = $('#stop-detail');
-    
+
     // Routes serving this stop
     const routesBadges = (stop.routes || []).map(r => {
         const color = normalizeColor(r.colour);
@@ -1192,7 +1202,7 @@ function renderStopDetail(stop, arrivals) {
             <span class="name">${r.label}</span>
         </span>`;
     }).join('');
-    
+
     // Arrivals
     let arrivalsHtml = '';
     if (arrivals.length === 0) {
@@ -1259,17 +1269,18 @@ function renderStopDetail(stop, arrivals) {
             const clickableClass = hasLocation ? 'clickable' : '';
             const busId = arr.shiftSolutionId || '';
 
-            // Show calculated estimate under official time if both exist
-            const showComparison = arr.officialEta !== null && arr.officialEta !== undefined && arr.calculatedEta;
-            const comparisonHtml = showComparison
-                ? `<span class="arrival-time-estimate" onclick="event.stopPropagation(); showEstimateInfo();">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
-                        <circle cx="12" cy="12" r="10"/>
-                        <path d="M12 16v-4M12 8h.01"/>
-                    </svg>
-                    Our Est: ${arr.calculatedEta}m
-                </span>`
-                : '';
+            // [DISABLED] Show calculated estimate under official time if both exist
+            // const showComparison = arr.officialEta !== null && arr.officialEta !== undefined && arr.calculatedEta;
+            // const comparisonHtml = showComparison
+            //     ? `<span class="arrival-time-estimate" onclick="event.stopPropagation(); showEstimateInfo();">
+            //         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+            //             <circle cx="12" cy="12" r="10"/>
+            //             <path d="M12 16v-4M12 8h.01"/>
+            //         </svg>
+            //         Our Est: ${arr.calculatedEta}m
+            //     </span>`
+            //     : '';
+            const comparisonHtml = ''; // Custom ETA comparison disabled
 
             return `
                 <div class="arrival-card ${clickableClass}" style="animation-delay: ${i * 50}ms" data-bus-id="${busId}" data-bus-lat="${loc.latitude || ''}" data-bus-lon="${loc.longitude || ''}">
@@ -1311,7 +1322,8 @@ function renderStopDetail(stop, arrivals) {
                                 Updated ${timeAgo}
                             </span>
                         ` : ''}
-                        ${(arr.officialEta !== null && arr.officialEta !== undefined) ? `
+                        ${ /* [DISABLED] Live vs Estimated indicator - custom ETA feature disabled
+                        (arr.officialEta !== null && arr.officialEta !== undefined) ? `
                             <span class="arrival-detail-item eta-source eta-live" title="Live ETA from transit system">
                                 <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
                                     <circle cx="12" cy="12" r="6"/>
@@ -1325,7 +1337,7 @@ function renderStopDetail(stop, arrivals) {
                                 </svg>
                                 Estimated
                             </span>
-                        `}
+                        ` */ ''}
                     </div>
                     ${hasLocation ? `
                         <div class="arrival-card-action">
@@ -1340,12 +1352,12 @@ function renderStopDetail(stop, arrivals) {
         }).join('');
     }
     
-    // Directions button
+    // Directions URL
     const hasCoords = stop.latitude && stop.longitude;
-    const directionsUrl = hasCoords 
+    const directionsUrl = hasCoords
         ? `https://www.google.com/maps/dir/?api=1&destination=${stop.latitude},${stop.longitude}&travelmode=walking`
         : null;
-    
+
     container.innerHTML = `
         <div class="detail-header">
             <h2 class="detail-stop-name">${stop.label}</h2>
@@ -1355,12 +1367,20 @@ function renderStopDetail(stop, arrivals) {
                         <svg viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
                         </svg>
-                        ${formatDistance(stop.distance)} away
+                        ${formatDistance(stop.distance)}
                     </span>
+                ` : ''}
+                ${directionsUrl ? `
+                    <a href="${directionsUrl}" target="_blank" rel="noopener" class="directions-link" title="Get directions">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M21.71 11.29l-9-9c-.39-.39-1.02-.39-1.41 0l-9 9c-.39.39-.39 1.02 0 1.41l9 9c.39.39 1.02.39 1.41 0l9-9c.39-.38.39-1.01 0-1.41zM14 14.5V12h-4v3H8v-4c0-.55.45-1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/>
+                        </svg>
+                        Directions
+                    </a>
                 ` : ''}
             </div>
         </div>
-        
+
         ${routesBadges ? `
             <div class="detail-section">
                 <h4 class="detail-section-title">Routes</h4>
@@ -1369,20 +1389,11 @@ function renderStopDetail(stop, arrivals) {
                 </div>
             </div>
         ` : ''}
-        
+
         <div class="detail-section">
             <h4 class="detail-section-title">Next Arrivals</h4>
             ${arrivalsHtml}
         </div>
-        
-        ${directionsUrl ? `
-            <a href="${directionsUrl}" target="_blank" rel="noopener" class="btn-directions">
-                <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M21.71 11.29l-9-9c-.39-.39-1.02-.39-1.41 0l-9 9c-.39.39-.39 1.02 0 1.41l9 9c.39.39 1.02.39 1.41 0l9-9c.39-.38.39-1.01 0-1.41zM14 14.5V12h-4v3H8v-4c0-.55.45-1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/>
-                </svg>
-                Get Directions
-            </a>
-        ` : ''}
     `;
 
     // Add click handlers for clickable arrival cards
@@ -1495,11 +1506,28 @@ function updateMapMarkers() {
     state.routePolylines = [];
     
     const filterRouteId = state.selectedRouteFilter;
-    
-    // Note: Route polylines are not drawn because the API doesn't provide
-    // actual road geometry. Connecting stops with straight lines looks wrong
-    // since buses follow roads, not straight paths between stops.
-    
+
+    // Draw route polylines from pre-generated paths (road-following geometry via OSRM)
+    if (typeof ROUTE_PATHS !== 'undefined') {
+        for (const [routeId, routeData] of Object.entries(ROUTE_PATHS)) {
+            // Skip if filtering to a different route
+            if (filterRouteId && routeId !== filterRouteId) continue;
+
+            if (routeData.path && routeData.path.length > 1) {
+                const color = normalizeColor(routeData.colour);
+                const polyline = L.polyline(routeData.path, {
+                    color: color,
+                    weight: 4,
+                    opacity: 0.7,
+                    lineCap: 'round',
+                    lineJoin: 'round',
+                }).addTo(state.map);
+
+                state.routePolylines.push(polyline);
+            }
+        }
+    }
+
     // Add stop markers
     for (const stop of state.stops) {
         if (!stop.latitude || !stop.longitude) continue;
@@ -1602,7 +1630,13 @@ function updateMapMarkers() {
 function showMapStopInfo(stop) {
     const overlay = $('#map-overlay');
     const arrivals = getNextArrivalsForStop(stop.id);
-    
+
+    // Directions URL
+    const hasCoords = stop.latitude && stop.longitude;
+    const directionsUrl = hasCoords
+        ? `https://www.google.com/maps/dir/?api=1&destination=${stop.latitude},${stop.longitude}&travelmode=walking`
+        : null;
+
     let arrivalsHtml = '';
     if (arrivals.length === 0) {
         arrivalsHtml = '<p class="no-arrivals">No buses en route</p>';
@@ -1611,12 +1645,12 @@ function showMapStopInfo(stop) {
             const eta = formatETA(arr.etaMinutes);
             const color = normalizeColor(arr.route.colour);
             const capacity = formatCapacity(arr.capacity);
-            
+
             let capacityHtml = '';
             if (capacity) {
                 capacityHtml = `<span class="arrival-capacity ${capacity.className}" title="${capacity.text}">${capacity.icon}</span>`;
             }
-            
+
             return `
                 <div class="arrival-row">
                     <div class="route-badge" style="background: ${color}20">
@@ -1631,16 +1665,25 @@ function showMapStopInfo(stop) {
             `;
         }).join('');
     }
-    
+
     overlay.innerHTML = `
         <div class="map-stop-info">
             <div class="map-stop-info-header">
                 <span class="map-stop-info-name">${stop.label}</span>
-                <button class="map-stop-info-close" onclick="hideMapStopInfo()">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M18 6L6 18M6 6l12 12"/>
-                    </svg>
-                </button>
+                <div class="map-stop-info-actions">
+                    ${directionsUrl ? `
+                        <a href="${directionsUrl}" target="_blank" rel="noopener" class="directions-link" title="Get directions">
+                            <svg viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M21.71 11.29l-9-9c-.39-.39-1.02-.39-1.41 0l-9 9c-.39.39-.39 1.02 0 1.41l9 9c.39.39 1.02.39 1.41 0l9-9c.39-.38.39-1.01 0-1.41zM14 14.5V12h-4v3H8v-4c0-.55.45-1 1-1h5V7.5l3.5 3.5-3.5 3.5z"/>
+                            </svg>
+                        </a>
+                    ` : ''}
+                    <button class="map-stop-info-close" onclick="hideMapStopInfo()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M18 6L6 18M6 6l12 12"/>
+                        </svg>
+                    </button>
+                </div>
             </div>
             <div class="stop-arrivals">
                 ${arrivalsHtml}
@@ -1752,7 +1795,7 @@ async function refreshData() {
         
         // Re-render current view
         if (state.currentView === 'nearby') {
-            renderNearbyStops();
+            await renderNearbyStops();
         } else if (state.currentView === 'detail' && state.selectedStop) {
             const arrivals = await fetchArrivalsForStop(state.selectedStop.id);
             state.selectedStopArrivals = arrivals;
@@ -1833,10 +1876,10 @@ async function init() {
         
         // Hide loading, show app
         hideLoading();
-        
+
         // Render initial view
-        renderNearbyStops();
-        
+        await renderNearbyStops();
+
         // Start auto-refresh
         state.refreshInterval = setInterval(refreshData, CONFIG.REFRESH_INTERVAL_MS);
         
@@ -1885,8 +1928,8 @@ document.addEventListener('DOMContentLoaded', () => {
             updateLocationBar();
             
             calculateNearbyStops();
-            renderNearbyStops();
-            
+            await renderNearbyStops();
+
             if (state.map) {
                 if (state.userMarker) {
                     state.userMarker.setLatLng([location.lat, location.lon]);
@@ -1967,9 +2010,7 @@ if ('serviceWorker' in navigator) {
 // Make functions globally available
 window.hideMapStopInfo = hideMapStopInfo;
 
-/**
- * Show info popup explaining how our ETA estimate is calculated
- */
+/* [DISABLED] Custom ETA feature - kept for future use
 function showEstimateInfo() {
     const modal = document.createElement('div');
     modal.className = 'estimate-info-modal';
@@ -1998,3 +2039,4 @@ function showEstimateInfo() {
     document.body.appendChild(modal);
 }
 window.showEstimateInfo = showEstimateInfo;
+*/
