@@ -294,14 +294,16 @@ function parseRoutesAndStops(payload) {
         routesList = findListWithKey(data, 'stops') || [];
     }
     
-    // Build stops lookup
+    // Build stops lookup - index by multiple IDs for flexible lookup
     const stopsById = new Map();
     const stopsList = data?.stops;
     if (Array.isArray(stopsList)) {
         for (const stop of stopsList) {
             if (typeof stop !== 'object') continue;
-            const stopId = first(stop.addressId, stop.id, stop.stopId);
-            if (stopId) stopsById.set(stopId, stop);
+            // Index by all possible IDs so we can look up by any reference
+            if (stop.id) stopsById.set(stop.id, stop);
+            if (stop.addressId) stopsById.set(stop.addressId, stop);
+            if (stop.stopId) stopsById.set(stop.stopId, stop);
         }
     }
     
@@ -329,17 +331,29 @@ function parseRoutesAndStops(payload) {
             for (const s of routeStops) {
                 let stopObj = null;
                 if (typeof s === 'object') {
-                    stopObj = s;
+                    // Inline stop object - try to enrich with full data from lookup
+                    const lookupId = s.id || s.addressId || s.stopId;
+                    stopObj = stopsById.get(lookupId) || s;
                 } else if (typeof s === 'string' && stopsById.has(s)) {
                     stopObj = stopsById.get(s);
+                } else if (typeof s === 'number' && stopsById.has(s)) {
+                    stopObj = stopsById.get(s);
                 }
-                
+
                 if (!stopObj) continue;
-                
-                const stopId = first(stopObj.addressId, stopObj.id, stopObj.stopId);
+
+                // The API's `id` field contains the UUID needed for getrunningstopdetails
+                // `addressId` is actually a numeric ID (confusingly named)
+                const rawId = stopObj.id;
+                const isIdUuid = typeof rawId === 'string' && rawId.includes('-') && rawId.length > 30;
+                const stopUuid = isIdUuid ? rawId : null;
+
+                const stopId = first(stopObj.id, stopObj.addressId, stopObj.stopId);
                 const stopLabel = first(stopObj.label, stopObj.name) || 'Unknown Stop';
+
                 const stopData = {
                     id: stopId || stopLabel,
+                    addressId: stopUuid,  // Store the UUID for API calls (from `id` field when it's a UUID)
                     label: stopLabel,
                     latitude: stopObj.latitude,
                     longitude: stopObj.longitude,
@@ -491,16 +505,31 @@ async function fetchRunningBuses() {
 
 /**
  * Fetch stop details (arrivals)
+ * Returns array from data.stop in the API response
+ * @param {string} stopId - The addressId (UUID) of the stop
  */
 async function fetchStopDetails(stopId) {
     if (!stopId) return [];
-    
+
+    // API requires the UUID format for stopId
+    // Skip if stopId doesn't look like a UUID
+    const stopIdStr = String(stopId);
+    const isUuid = stopIdStr.includes('-') && stopIdStr.length > 30;
+    if (!isUuid) {
+        return [];
+    }
+
     try {
-        const payload = await fetchApi('getrunningstopdetails', { stopId });
+        const payload = await fetchApi('getrunningstopdetails', { stopId: stopIdStr });
+        // API returns { status: 200, data: { stop: [...] } }
+        if (payload?.data?.stop && Array.isArray(payload.data.stop)) {
+            return payload.data.stop;
+        }
+        // Fallback: try to find array with shiftSolutionId
         const stops = findListWithKey(payload, 'shiftSolutionId');
         return stops || [];
     } catch (err) {
-        // API returns 500 when no buses - treat as empty
+        // API returns 500 when no buses or invalid stop - treat as empty
         if (err.message.includes('500')) return [];
         throw err;
     }
@@ -710,6 +739,49 @@ function calculateRouteAwareETA(bus, targetStop, routeId) {
 }
 
 /**
+ * Get the next stop for a bus based on its current position
+ * @returns {Object|null} { id, label } of the next stop, or null if unknown
+ */
+function getNextStopForBus(bus) {
+    const loc = bus.location || {};
+    const busLat = loc.latitude;
+    const busLon = loc.longitude;
+    const route = bus.route || {};
+    const routeId = route.id || route.label;
+
+    if (!busLat || !busLon || !routeId) return null;
+
+    // Get the stop sequence for this route
+    const stopSequence = state.routeStopSequences.get(routeId);
+    if (!stopSequence || stopSequence.length < 2) return null;
+
+    // Find which stop the bus is closest to
+    let closestIndex = 0;
+    let closestDistance = Infinity;
+
+    for (let i = 0; i < stopSequence.length; i++) {
+        const stop = stopSequence[i];
+        const dist = haversineDistance(busLat, busLon, stop.latitude, stop.longitude);
+        if (dist < closestDistance) {
+            closestDistance = dist;
+            closestIndex = i;
+        }
+    }
+
+    // The next stop is the one after the closest (wrapping around for loop routes)
+    const nextIndex = (closestIndex + 1) % stopSequence.length;
+    const nextStopData = stopSequence[nextIndex];
+
+    // Find the full stop info from state.stops
+    const fullStop = state.stops.find(s => s.id === nextStopData.id);
+
+    return {
+        id: nextStopData.id,
+        label: fullStop?.label || 'Next stop',
+    };
+}
+
+/**
  * Get next arrivals for a stop
  * Uses route-aware ETA calculation considering stops along the way
  */
@@ -730,10 +802,13 @@ function getNextArrivalsForStop(stopId) {
         
         if (matchingRoute) {
             const routeId = busRoute.id || busRoute.label;
-            
+
             // Calculate route-aware ETA
             const etaMinutes = calculateRouteAwareETA(bus, stop, routeId);
-            
+
+            // Get the bus's next stop
+            const nextStop = getNextStopForBus(bus);
+
             arrivals.push({
                 shiftSolutionId: bus.shiftSolutionId,
                 route: {
@@ -744,6 +819,7 @@ function getNextArrivalsForStop(stopId) {
                 vehicle: bus.vehicle,
                 location: bus.location,
                 capacity: bus.capacity,  // Include capacity info
+                nextStop,  // Include next stop info
                 etaMinutes,
             });
         }
@@ -760,39 +836,91 @@ function getNextArrivalsForStop(stopId) {
 }
 
 /**
+ * Parse capacity from availableCapacities array (API format)
+ */
+function parseCapacityFromApi(availableCapacities) {
+    if (!Array.isArray(availableCapacities) || availableCapacities.length === 0) {
+        return null;
+    }
+
+    let standardSeats = null;
+    let wheelchairSeats = null;
+
+    for (const cap of availableCapacities) {
+        if (typeof cap !== 'object') continue;
+        const name = cap.capacityName || '';
+        const amount = cap.amount;
+
+        if (amount !== null && amount !== undefined) {
+            if (name === 'standard' || name === '') {
+                standardSeats = amount;
+            } else if (name === 'wheelchair') {
+                wheelchairSeats = amount;
+            }
+        }
+    }
+
+    if (standardSeats !== null) {
+        return {
+            available: standardSeats,
+            wheelchair: wheelchairSeats,
+            total: null,
+            percentage: null,
+        };
+    }
+
+    return null;
+}
+
+/**
  * Get arrivals from stop details API
  * Uses API-provided stopEta which accounts for traffic and route
  * Falls back to calculated arrivals if API returns empty
  */
 async function fetchArrivalsForStop(stopId) {
     try {
-        const details = await fetchStopDetails(stopId);
         const stop = state.stops.find(s => s.id === stopId);
-        
+        // Use addressId (UUID) for API call, fall back to stopId
+        const apiStopId = stop?.addressId || stopId;
+        const details = await fetchStopDetails(apiStopId);
+
         // If API returned results, use them
         if (details && details.length > 0) {
             return details.map(entry => {
                 const route = entry.route || {};
-                
-                // Find full bus info from running buses (has capacity data)
-                const bus = state.runningBuses.find(b => 
+
+                // Find full bus info from running buses (has location data)
+                const bus = state.runningBuses.find(b =>
                     b.shiftSolutionId === entry.shiftSolutionId
                 ) || {};
-                
-                // Use API-provided stopEta (already accounts for route and stops)
-                // The API returns ETA in minutes, can be negative if bus has passed
-                let etaMinutes = entry.stopEta;
-                
-                // If API didn't provide ETA, calculate it ourselves
-                if (etaMinutes === null || etaMinutes === undefined) {
-                    const routeId = route.id || route.label;
-                    etaMinutes = calculateRouteAwareETA(
-                        { location: bus.location || entry.location },
-                        stop,
-                        routeId
-                    );
+
+                // Use API-provided stopEta (official ETA from server)
+                const officialEta = entry.stopEta;
+
+                // Calculate our own ETA for comparison/fallback
+                const routeId = route.id || route.label;
+                const calculatedEta = calculateRouteAwareETA(
+                    { location: bus.location || entry.location },
+                    stop,
+                    routeId
+                );
+
+                // Use official ETA if available, otherwise use calculated
+                const etaMinutes = (officialEta !== null && officialEta !== undefined)
+                    ? officialEta
+                    : calculatedEta;
+
+                // Use busTowards from API as the next stop direction, fall back to calculated
+                let nextStop = null;
+                if (route.busTowards) {
+                    nextStop = { label: route.busTowards };
+                } else {
+                    nextStop = getNextStopForBus(bus.shiftSolutionId ? bus : { ...entry, route, location: bus.location });
                 }
-                
+
+                // Parse capacity from API response (entry.availableCapacities) or from running bus
+                const capacity = parseCapacityFromApi(entry.availableCapacities) || bus.capacity || null;
+
                 return {
                     shiftSolutionId: entry.shiftSolutionId,
                     route: {
@@ -802,12 +930,15 @@ async function fetchArrivalsForStop(stopId) {
                     },
                     vehicle: bus.vehicle || entry.vehicle,
                     location: bus.location || entry.location,
-                    capacity: bus.capacity || null,  // Include capacity info
+                    capacity,
+                    nextStop,
                     etaMinutes,
+                    officialEta,      // Keep official ETA for display
+                    calculatedEta,    // Keep calculated ETA for comparison
                 };
             });
         }
-        
+
         // API returned empty - fall back to calculated arrivals
         console.log('[API] Stop details empty, using calculated arrivals');
         return getNextArrivalsForStop(stopId);
@@ -956,17 +1087,26 @@ function createStopCard(stop, arrivals) {
             const eta = formatETA(arr.etaMinutes);
             const color = normalizeColor(arr.route.colour);
             const capacity = formatCapacity(arr.capacity);
-            
+
             let capacityHtml = '';
             if (capacity) {
                 capacityHtml = `<span class="arrival-capacity ${capacity.className}" title="${capacity.text}">${capacity.icon}</span>`;
             }
-            
+
+            // Next stop info
+            let nextStopHtml = '';
+            if (arr.nextStop && arr.nextStop.label) {
+                nextStopHtml = `<span class="arrival-next-stop" title="Next stop">Next: ${arr.nextStop.label}</span>`;
+            }
+
             return `
                 <div class="arrival-row">
-                    <div class="route-badge" style="background: ${color}20">
-                        <span class="dot" style="background: ${color}"></span>
-                        <span class="name">${arr.route.label}</span>
+                    <div class="arrival-route-info">
+                        <div class="route-badge" style="background: ${color}20">
+                            <span class="dot" style="background: ${color}"></span>
+                            <span class="name">${arr.route.label}</span>
+                        </div>
+                        ${nextStopHtml}
                     </div>
                     <div class="arrival-info">
                         ${capacityHtml}
@@ -1100,15 +1240,48 @@ function renderStopDetail(stop, arrivals) {
                     </span>
                 `;
             }
-            
+
+            // Next stop display for detail view
+            let nextStopHtml = '';
+            if (arr.nextStop && arr.nextStop.label) {
+                nextStopHtml = `
+                    <span class="arrival-detail-item">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                        </svg>
+                        Next: ${arr.nextStop.label}
+                    </span>
+                `;
+            }
+
+            // Check if bus has valid location for map view
+            const hasLocation = loc.latitude && loc.longitude;
+            const clickableClass = hasLocation ? 'clickable' : '';
+            const busId = arr.shiftSolutionId || '';
+
+            // Show calculated estimate under official time if both exist
+            const showComparison = arr.officialEta !== null && arr.officialEta !== undefined && arr.calculatedEta;
+            const comparisonHtml = showComparison
+                ? `<span class="arrival-time-estimate" onclick="event.stopPropagation(); showEstimateInfo();">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+                        <circle cx="12" cy="12" r="10"/>
+                        <path d="M12 16v-4M12 8h.01"/>
+                    </svg>
+                    Our Est: ${arr.calculatedEta}m
+                </span>`
+                : '';
+
             return `
-                <div class="arrival-card" style="animation-delay: ${i * 50}ms">
+                <div class="arrival-card ${clickableClass}" style="animation-delay: ${i * 50}ms" data-bus-id="${busId}" data-bus-lat="${loc.latitude || ''}" data-bus-lon="${loc.longitude || ''}">
                     <div class="arrival-card-header">
                         <div class="arrival-route">
                             <span class="arrival-route-dot" style="background: ${color}"></span>
                             <span class="arrival-route-name">${arr.route.label}</span>
                         </div>
-                        <span class="arrival-time ${eta.className}">${eta.text}</span>
+                        <div class="arrival-time-container">
+                            <span class="arrival-time ${eta.className}">${eta.text}</span>
+                            ${comparisonHtml}
+                        </div>
                     </div>
                     <div class="arrival-details">
                         <span class="arrival-detail-item">
@@ -1120,6 +1293,7 @@ function renderStopDetail(stop, arrivals) {
                             ${vehicleName}
                         </span>
                         ${capacityHtml}
+                        ${nextStopHtml}
                         ${distanceInfo ? `
                             <span class="arrival-detail-item">
                                 <svg viewBox="0 0 24 24" fill="currentColor">
@@ -1137,7 +1311,30 @@ function renderStopDetail(stop, arrivals) {
                                 Updated ${timeAgo}
                             </span>
                         ` : ''}
+                        ${(arr.officialEta !== null && arr.officialEta !== undefined) ? `
+                            <span class="arrival-detail-item eta-source eta-live" title="Live ETA from transit system">
+                                <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
+                                    <circle cx="12" cy="12" r="6"/>
+                                </svg>
+                                Live
+                            </span>
+                        ` : `
+                            <span class="arrival-detail-item eta-source eta-calculated" title="Estimated based on bus location, route distance, and typical stop times">
+                                <svg viewBox="0 0 24 24" fill="currentColor" width="12" height="12">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                </svg>
+                                Estimated
+                            </span>
+                        `}
                     </div>
+                    ${hasLocation ? `
+                        <div class="arrival-card-action">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 18l6-6-6-6"/>
+                            </svg>
+                            View on map
+                        </div>
+                    ` : ''}
                 </div>
             `;
         }).join('');
@@ -1187,6 +1384,17 @@ function renderStopDetail(stop, arrivals) {
             </a>
         ` : ''}
     `;
+
+    // Add click handlers for clickable arrival cards
+    container.querySelectorAll('.arrival-card.clickable').forEach(card => {
+        card.addEventListener('click', () => {
+            const busLat = parseFloat(card.dataset.busLat);
+            const busLon = parseFloat(card.dataset.busLon);
+            if (busLat && busLon) {
+                showBusOnMap(busLat, busLon);
+            }
+        });
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1448,6 +1656,34 @@ function hideMapStopInfo() {
 function centerMapOnUser() {
     if (!state.map || !state.userLat || !state.userLon) return;
     state.map.setView([state.userLat, state.userLon], CONFIG.MAP_ZOOM_DEFAULT);
+}
+
+/**
+ * Show a specific bus location on the map
+ * Switches to map view and centers on the bus
+ */
+function showBusOnMap(lat, lon) {
+    // Switch to map view
+    updateHeaderTitle('Map');
+    $('#btn-back').classList.add('hidden');
+    switchView('map');
+
+    // Wait for map to initialize then center on bus
+    setTimeout(() => {
+        if (state.map) {
+            state.map.setView([lat, lon], CONFIG.MAP_ZOOM_FOCUSED);
+
+            // Find and highlight the bus marker (open its popup)
+            for (const marker of state.busMarkers) {
+                const markerLatLng = marker.getLatLng();
+                const dist = haversineDistance(markerLatLng.lat, markerLatLng.lng, lat, lon);
+                if (dist < 0.01) { // Within ~50 feet
+                    marker.openPopup();
+                    break;
+                }
+            }
+        }
+    }, 150);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1728,5 +1964,37 @@ if ('serviceWorker' in navigator) {
         .catch(err => console.log('[SW] Registration failed:', err));
 }
 
-// Make hideMapStopInfo globally available
+// Make functions globally available
 window.hideMapStopInfo = hideMapStopInfo;
+
+/**
+ * Show info popup explaining how our ETA estimate is calculated
+ */
+function showEstimateInfo() {
+    const modal = document.createElement('div');
+    modal.className = 'estimate-info-modal';
+    modal.innerHTML = `
+        <div class="estimate-info-backdrop" onclick="this.parentElement.remove()"></div>
+        <div class="estimate-info-content">
+            <div class="estimate-info-header">
+                <h3>How We Calculate ETAs</h3>
+                <button class="estimate-info-close" onclick="this.closest('.estimate-info-modal').remove()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="estimate-info-body">
+                <p>When official ETAs are available, we also show our own estimate for comparison. Here's how we calculate it:</p>
+                <ul>
+                    <li><strong>Average Speed:</strong> ${CONFIG.BUS_AVG_SPEED_MPH} mph (accounting for stops, traffic, and campus conditions)</li>
+                    <li><strong>Stop Time:</strong> ${CONFIG.STOP_TIME_SECONDS} seconds per intermediate stop</li>
+                    <li><strong>Traffic Buffer:</strong> ${Math.round(CONFIG.TRAFFIC_BUFFER_PERCENT * 100)}% added for delays</li>
+                </ul>
+                <p class="estimate-info-note">Our estimate uses the bus's GPS location and calculates the route distance through each stop. The official "Live" ETA comes directly from the transit system.</p>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+window.showEstimateInfo = showEstimateInfo;

@@ -1,5 +1,6 @@
 
-// Liftango API base URconst LIFTANGO_API = 'https://hailer-odb-prod.liftango.com';
+// Liftango API base UR
+const LIFTANGO_API = 'https://hailer-odb-prod.liftango.com';
 
 // Allowed origins (add your domains here, or use '*' for public access)
 const ALLOWED_ORIGINS = [
@@ -44,9 +45,10 @@ export default {
             });
         }
 
-        // Only proxy /api/* paths
+        // Only proxy /api/* paths - these are always forwarded to LIFTANGO_API host only
+        // The target host is hardcoded in proxyRequest(), so this cannot be abused to proxy to other sites
         if (!url.pathname.startsWith('/api/')) {
-            return new Response('Not found. Use /api/* to proxy to Liftango API.', { status: 404 });
+            return new Response('Not found', { status: 404 });
         }
 
         // Get client IP for rate limiting
@@ -137,21 +139,29 @@ async function checkRateLimit(clientIP, env) {
 
 /**
  * Proxy request to Liftango API
+ * SECURITY: Target host is hardcoded - requests can ONLY go to LIFTANGO_API
  */
 async function proxyRequest(request, url) {
-    // Build target URL
+    // Build target URL - ONLY proxies to the hardcoded Liftango host
     const apiPath = url.pathname.substring(4); // Remove '/api' prefix
     const targetUrl = LIFTANGO_API + apiPath + url.search;
 
-    // Build headers for the upstream request
+    // Sanity check: ensure we're only hitting Liftango
+    if (!targetUrl.startsWith(LIFTANGO_API)) {
+        throw new Error('Invalid target URL');
+    }
+
+    // Build headers for the upstream request - match official app headers
+    const traceId = `ops-${crypto.randomUUID()}`;
     const headers = new Headers({
-        'Accept': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Origin': 'https://purdue.liftango.com',
         'Referer': 'https://purdue.liftango.com/',
-        'User-Agent': 'PurdueTransitPWA/1.0',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
         'x-lifty-product-id': 'fixed_route',
-        'x-lifty-session-id': 'pwa-proxy',
-        'x-lifty-trace-id': crypto.randomUUID(),
+        'x-lifty-session-id': `ops-${crypto.randomUUID()}`,
+        'x-lifty-trace-id': traceId,
     });
 
     // Make the request

@@ -350,14 +350,32 @@ body {
 .arrival-row {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
+}
+
+.arrival-route-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.arrival-next-stop {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-left: 14px;
 }
 
 .arrival-info {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: auto;
+    flex-shrink: 0;
 }
 
 .route-badge {
@@ -540,12 +558,39 @@ body {
 
 .arrival-route-name {
     font-weight: 600;
-    font-size: 1rem;
+    font-size: 1.15rem;
+}
+
+.arrival-time-container {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
 }
 
 .arrival-time {
     font-size: 1.5rem;
     font-weight: 700;
+}
+
+.arrival-time-estimate {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color var(--transition-fast);
+}
+
+.arrival-time-estimate:hover {
+    color: var(--text-secondary);
+}
+
+.arrival-time-estimate svg {
+    width: 12px;
+    height: 12px;
+    opacity: 0.7;
 }
 
 .arrival-time.arriving {
@@ -577,6 +622,77 @@ body {
 .arrival-detail-item svg {
     width: 14px;
     height: 14px;
+    opacity: 0.7;
+}
+
+/* Clickable arrival cards */
+.arrival-card.clickable {
+    cursor: pointer;
+    transition: transform var(--transition-fast), background var(--transition-fast);
+}
+
+.arrival-card.clickable:hover {
+    background: var(--bg-elevated);
+}
+
+.arrival-card.clickable:active {
+    transform: scale(0.98);
+}
+
+.arrival-card-action {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--dust);
+    font-size: 0.85rem;
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.arrival-card-action svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* ETA source indicators */
+.eta-source {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.8rem;
+    padding: 2px 8px;
+    border-radius: var(--radius-full);
+}
+
+.eta-source svg {
+    width: 10px;
+    height: 10px;
+}
+
+.eta-live {
+    background: rgba(74, 222, 128, 0.15);
+    color: var(--arriving);
+}
+
+.eta-live svg {
+    animation: pulse 2s ease-in-out infinite;
+}
+
+.eta-calculated {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--later);
+}
+
+/* ETA comparison (shows calculated estimate when official ETA is available) */
+.eta-comparison {
+    opacity: 0.7;
+    font-style: italic;
+    cursor: help;
+}
+
+.eta-comparison svg {
     opacity: 0.7;
 }
 
@@ -720,10 +836,10 @@ body {
     box-shadow: 0 0 0 8px rgba(74, 144, 217, 0.3), 0 4px 12px rgba(0, 0, 0, 0.3);
 }
 
-/* Floating Route Filter */
+/* Floating Route Filter - Top Right */
 .map-route-filter {
     position: absolute;
-    bottom: calc(var(--nav-height) + var(--safe-bottom) + 8px);
+    top: 16px;
     right: 16px;
     z-index: 1000;
 }
@@ -766,7 +882,7 @@ body {
 
 .route-filter-dropdown {
     position: absolute;
-    bottom: calc(100% + 8px);
+    top: calc(100% + 8px);
     right: 0;
     min-width: 220px;
     max-height: 300px;
@@ -775,7 +891,7 @@ body {
     border: 1px solid var(--border-color);
     border-radius: var(--radius-md);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-    animation: fadeIn 150ms ease;
+    animation: fadeInDown 150ms ease;
 }
 
 .route-filter-item {
@@ -1194,6 +1310,17 @@ body {
     }
 }
 
+@keyframes fadeInDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
 @keyframes spin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
@@ -1280,6 +1407,108 @@ body {
 
 .popup-stop-routes.capacity-full {
     color: var(--late);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Estimate Info Modal
+   ─────────────────────────────────────────────────────────────────────────────*/
+
+.estimate-info-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.estimate-info-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+}
+
+.estimate-info-content {
+    position: relative;
+    background: var(--bg-card);
+    border-radius: var(--radius-lg);
+    max-width: 400px;
+    width: 100%;
+    animation: fadeInUp 200ms ease;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.estimate-info-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--dust);
+}
+
+.estimate-info-header h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.estimate-info-close {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.estimate-info-close:hover {
+    background: var(--dust);
+}
+
+.estimate-info-close svg {
+    width: 16px;
+    height: 16px;
+}
+
+.estimate-info-body {
+    padding: 20px;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+.estimate-info-body p {
+    margin-bottom: 16px;
+}
+
+.estimate-info-body ul {
+    list-style: none;
+    margin-bottom: 16px;
+}
+
+.estimate-info-body li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--dust);
+}
+
+.estimate-info-body li:last-child {
+    border-bottom: none;
+}
+
+.estimate-info-body strong {
+    color: var(--text-primary);
+}
+
+.estimate-info-note {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 0 !important;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
