@@ -30,8 +30,8 @@ BoilerBus is a Progressive Web App (PWA) that can be installed on your phone's h
 
 ## Documentation
 
-- **[Self-Hosting Guide](../../wiki/Self-Hosting)** - Deploy your own instance with a CORS proxy
-- **[Liftango API Documentation](../../wiki/Liftango-API)** - Complete API docs for building your own transit apps
+- **[Self-Hosting Guide](../../wiki/Self-Hosting)** 
+- **[Liftango API Documentation](../../wiki/Liftango-API)** 
 
 ## Quick Start (Local Development)
 
