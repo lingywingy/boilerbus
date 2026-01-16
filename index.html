@@ -10,6 +10,16 @@
     <meta name="apple-mobile-web-app-title" content="BoilerBus">
     <meta name="description" content="Unofficial real-time Purdue bus tracking - find nearby stops, view ETAs, and navigate campus transit">
 
+    <!-- Content Security Policy for defense in depth -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' https://unpkg.com;
+        style-src 'self' 'unsafe-inline' https://unpkg.com https://fonts.googleapis.com;
+        font-src 'self' https://fonts.gstatic.com;
+        img-src 'self' data: https://*.basemaps.cartocdn.com https://*.tile.openstreetmap.org;
+        connect-src 'self' https://cors.ling-nyc.com https://nominatim.openstreetmap.org https://hailer-odb-prod.liftango.com;
+    ">
+
     <title>BoilerBus</title>
 
     <!-- Favicon -->

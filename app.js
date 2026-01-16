@@ -59,6 +59,33 @@ const CONFIG = {
     MAX_DISPLAY_ETA_MINUTES: window.APP_CONFIG?.MAX_DISPLAY_ETA_MINUTES || 100,
 };
 
+// Validate and sanitize CONFIG values to prevent issues from invalid configuration
+(function validateConfig() {
+    // API timeout: must be between 5s and 2min
+    if (typeof CONFIG.API_TIMEOUT_MS !== 'number' || CONFIG.API_TIMEOUT_MS < 5000 || CONFIG.API_TIMEOUT_MS > 120000) {
+        console.warn('[CONFIG] Invalid API_TIMEOUT_MS, using default 30000ms');
+        CONFIG.API_TIMEOUT_MS = 30000;
+    }
+
+    // Bus speed: must be positive and reasonable (1-60 mph)
+    if (typeof CONFIG.BUS_AVG_SPEED_MPH !== 'number' || CONFIG.BUS_AVG_SPEED_MPH <= 0 || CONFIG.BUS_AVG_SPEED_MPH > 60) {
+        console.warn('[CONFIG] Invalid BUS_AVG_SPEED_MPH, using default 10mph');
+        CONFIG.BUS_AVG_SPEED_MPH = 10;
+    }
+
+    // Refresh interval: must be between 5s and 5min
+    if (typeof CONFIG.REFRESH_INTERVAL_MS !== 'number' || CONFIG.REFRESH_INTERVAL_MS < 5000 || CONFIG.REFRESH_INTERVAL_MS > 300000) {
+        console.warn('[CONFIG] Invalid REFRESH_INTERVAL_MS, using default 30000ms');
+        CONFIG.REFRESH_INTERVAL_MS = 30000;
+    }
+
+    // Nearby radius: must be positive and reasonable (0.01-10 miles)
+    if (typeof CONFIG.NEARBY_RADIUS_MILES !== 'number' || CONFIG.NEARBY_RADIUS_MILES <= 0 || CONFIG.NEARBY_RADIUS_MILES > 10) {
+        console.warn('[CONFIG] Invalid NEARBY_RADIUS_MILES, using default 0.5 miles');
+        CONFIG.NEARBY_RADIUS_MILES = 0.5;
+    }
+})();
+
 // ═══════════════════════════════════════════════════════════════════════════
 // State Management
 // ═══════════════════════════════════════════════════════════════════════════
@@ -206,6 +233,28 @@ function debounce(fn, delay) {
         clearTimeout(timeout);
         timeout = setTimeout(() => fn(...args), delay);
     };
+}
+
+/**
+ * Escape HTML to prevent XSS attacks
+ * Use this for any user-provided or API-sourced data inserted into innerHTML
+ */
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    const div = document.createElement('div');
+    div.textContent = String(str);
+    return div.innerHTML;
+}
+
+/**
+ * Set refresh interval, clearing any existing one first
+ * Prevents multiple concurrent refresh timers
+ */
+function setRefreshInterval(intervalMs) {
+    if (state.refreshInterval) {
+        clearInterval(state.refreshInterval);
+    }
+    state.refreshInterval = setInterval(refreshData, intervalMs);
 }
 
 /**
@@ -1193,7 +1242,7 @@ function showToast(message, type = 'info') {
     const container = $('#toast-container');
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
-    toast.innerHTML = `<span class="toast-message">${message}</span>`;
+    toast.innerHTML = `<span class="toast-message">${escapeHtml(message)}</span>`;
     container.appendChild(toast);
     
     setTimeout(() => {
@@ -1231,7 +1280,7 @@ function showOffHoursBanner() {
         <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>
         </svg>
-        <span>Buses resume in <strong>${nextStartTime}</strong></span>
+        <span>Buses resume in <strong>${escapeHtml(nextStartTime)}</strong></span>
         <span class="off-hours-times">7 AM – 7 PM</span>
     `;
 
@@ -1367,13 +1416,13 @@ function createStopCard(stop, arrivals) {
 
             let capacityHtml = '';
             if (capacity) {
-                capacityHtml = `<span class="arrival-capacity ${capacity.className}" title="${capacity.text}">${capacity.icon}</span>`;
+                capacityHtml = `<span class="arrival-capacity ${escapeHtml(capacity.className)}" title="${escapeHtml(capacity.text)}">${escapeHtml(capacity.icon)}</span>`;
             }
 
             // Next stop info
             let nextStopHtml = '';
             if (arr.nextStop && arr.nextStop.label) {
-                nextStopHtml = `<span class="arrival-next-stop" title="Next stop">Next: ${arr.nextStop.label}</span>`;
+                nextStopHtml = `<span class="arrival-next-stop" title="Next stop">Next: ${escapeHtml(arr.nextStop.label)}</span>`;
             }
 
             return `
@@ -1381,31 +1430,36 @@ function createStopCard(stop, arrivals) {
                     <div class="arrival-route-info">
                         <div class="route-badge" style="background: ${color}20">
                             <span class="dot" style="background: ${color}"></span>
-                            <span class="name">${arr.route.label}</span>
+                            <span class="name">${escapeHtml(arr.route.label)}</span>
                         </div>
                         ${nextStopHtml}
                     </div>
                     <div class="arrival-info">
                         ${capacityHtml}
-                        <span class="arrival-eta ${eta.className}">${eta.text}</span>
+                        <span class="arrival-eta ${escapeHtml(eta.className)}">${escapeHtml(eta.text)}</span>
                     </div>
                 </div>
             `;
         }).join('');
     }
-    
+
     card.innerHTML = `
         <div class="stop-card-header">
-            <h3 class="stop-name">${stop.label}</h3>
-            <span class="stop-distance">${distanceStr}</span>
+            <h3 class="stop-name">${escapeHtml(stop.label)}</h3>
+            <span class="stop-distance">${escapeHtml(distanceStr)}</span>
         </div>
         <div class="stop-arrivals">
             ${arrivalsHtml}
         </div>
     `;
     
-    card.addEventListener('click', () => showStopDetail(stop));
-    
+    card.addEventListener('click', () => {
+        showStopDetail(stop).catch(err => {
+            console.error('[UI] Error showing stop detail:', err);
+            showToast('Failed to load stop details', 'error');
+        });
+    });
+
     return card;
 }
 
@@ -1432,13 +1486,13 @@ async function showStopDetail(stop) {
         const container = $('#stop-detail');
         container.innerHTML = `
             <div class="detail-header">
-                <h2 class="detail-stop-name">${stop.label}</h2>
+                <h2 class="detail-stop-name">${escapeHtml(stop.label)}</h2>
                 <div class="detail-meta">
                     <span class="detail-meta-item">
                         <svg viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
                         </svg>
-                        ${formatDistance(stop.distance || 0)} away
+                        ${escapeHtml(formatDistance(stop.distance || 0))} away
                     </span>
                 </div>
             </div>
@@ -1480,7 +1534,7 @@ function renderStopDetail(stop, arrivals) {
         const color = normalizeColor(r.colour);
         return `<span class="route-badge" style="background: ${color}20">
             <span class="dot" style="background: ${color}"></span>
-            <span class="name">${r.label}</span>
+            <span class="name">${escapeHtml(r.label)}</span>
         </span>`;
     }).join('');
 
@@ -1524,11 +1578,11 @@ function renderStopDetail(stop, arrivals) {
             let capacityHtml = '';
             if (capacity) {
                 capacityHtml = `
-                    <span class="arrival-detail-item ${capacity.className}">
+                    <span class="arrival-detail-item ${escapeHtml(capacity.className)}">
                         <svg viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
                         </svg>
-                        ${capacity.text}
+                        ${escapeHtml(capacity.text)}
                     </span>
                 `;
             }
@@ -1541,7 +1595,7 @@ function renderStopDetail(stop, arrivals) {
                         <svg viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
                         </svg>
-                        Next: ${arr.nextStop.label}
+                        Next: ${escapeHtml(arr.nextStop.label)}
                     </span>
                 `;
             }
@@ -1565,14 +1619,14 @@ function renderStopDetail(stop, arrivals) {
             const comparisonHtml = ''; // Custom ETA comparison disabled
 
             return `
-                <div class="arrival-card ${clickableClass}" style="animation-delay: ${i * 50}ms" data-bus-id="${busId}" data-bus-lat="${loc.latitude || ''}" data-bus-lon="${loc.longitude || ''}">
+                <div class="arrival-card ${clickableClass}" style="animation-delay: ${i * 50}ms" data-bus-id="${escapeHtml(busId)}" data-bus-lat="${loc.latitude || ''}" data-bus-lon="${loc.longitude || ''}">
                     <div class="arrival-card-header">
                         <div class="arrival-route">
                             <span class="arrival-route-dot" style="background: ${color}"></span>
-                            <span class="arrival-route-name">${arr.route.label}</span>
+                            <span class="arrival-route-name">${escapeHtml(arr.route.label)}</span>
                         </div>
                         <div class="arrival-time-container">
-                            <span class="arrival-time ${eta.className}">${eta.text}</span>
+                            <span class="arrival-time ${escapeHtml(eta.className)}">${escapeHtml(eta.text)}</span>
                             ${comparisonHtml}
                         </div>
                     </div>
@@ -1581,7 +1635,7 @@ function renderStopDetail(stop, arrivals) {
                             <svg viewBox="0 0 24 24" fill="currentColor">
                                 <path d="M4 16c0 .88.39 1.67 1 2.22V20c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h8v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8 .5-8 4v10zm3.5 1c-.83 0-1.5-.67-1.5-1.5S6.67 14 7.5 14s1.5.67 1.5 1.5S8.33 17 7.5 17zm9 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm1.5-6H6V6h12v5z"/>
                             </svg>
-                            ${vehicleName}
+                            ${escapeHtml(vehicleName)}
                         </span>
                         ${capacityHtml}
                         ${nextStopHtml}
@@ -1590,7 +1644,7 @@ function renderStopDetail(stop, arrivals) {
                                 <svg viewBox="0 0 24 24" fill="currentColor">
                                     <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
                                 </svg>
-                                ${distanceInfo}
+                                ${escapeHtml(distanceInfo)}
                             </span>
                         ` : ''}
                         ${timeAgo ? `
@@ -1599,7 +1653,7 @@ function renderStopDetail(stop, arrivals) {
                                     <circle cx="12" cy="12" r="10"/>
                                     <path d="M12 6v6l4 2" stroke="var(--bg-primary)" stroke-width="2"/>
                                 </svg>
-                                Updated ${timeAgo}
+                                Updated ${escapeHtml(timeAgo)}
                             </span>
                         ` : ''}
                         ${ /* [DISABLED] Live vs Estimated indicator - custom ETA feature disabled
@@ -1640,14 +1694,14 @@ function renderStopDetail(stop, arrivals) {
 
     container.innerHTML = `
         <div class="detail-header">
-            <h2 class="detail-stop-name">${stop.label}</h2>
+            <h2 class="detail-stop-name">${escapeHtml(stop.label)}</h2>
             <div class="detail-meta">
                 ${stop.distance ? `
                     <span class="detail-meta-item">
                         <svg viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
                         </svg>
-                        ${formatDistance(stop.distance)}
+                        ${escapeHtml(formatDistance(stop.distance))}
                     </span>
                 ` : ''}
                 ${directionsUrl ? `
@@ -1721,9 +1775,9 @@ function renderRouteFilterDropdown() {
         const busIndicator = activeBuses > 0 ? ` (${activeBuses} bus${activeBuses > 1 ? 'es' : ''})` : '';
         
         return `
-            <button class="route-filter-item ${isActive ? 'active' : ''}" data-route-id="${route.id}">
+            <button class="route-filter-item ${isActive ? 'active' : ''}" data-route-id="${escapeHtml(route.id)}">
                 <span class="route-filter-dot" style="background: ${color}"></span>
-                <span class="route-filter-name">${route.label}${busIndicator}</span>
+                <span class="route-filter-name">${escapeHtml(route.label)}${escapeHtml(busIndicator)}</span>
                 <svg class="route-filter-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="20 6 9 17 4 12"/>
                 </svg>
@@ -1776,10 +1830,10 @@ function initMap() {
 
 function updateMapMarkers() {
     if (!state.map) return;
-    
-    // Clear existing markers and polylines
-    state.stopMarkers.forEach(m => m.remove());
-    state.busMarkers.forEach(m => m.remove());
+
+    // Clear existing markers and polylines - remove event listeners first to prevent memory leaks
+    state.stopMarkers.forEach(m => { m.off(); m.remove(); });
+    state.busMarkers.forEach(m => { m.off(); m.remove(); });
     state.routePolylines.forEach(p => p.remove());
     state.stopMarkers = [];
     state.busMarkers = [];
@@ -1846,8 +1900,8 @@ function updateMapMarkers() {
         // Popup content
         const routeNames = (stop.routes || []).map(r => r.label).join(', ') || 'Unknown';
         marker.bindPopup(`
-            <div class="popup-stop-name">${stop.label}</div>
-            <div class="popup-stop-routes">${routeNames}</div>
+            <div class="popup-stop-name">${escapeHtml(stop.label)}</div>
+            <div class="popup-stop-routes">${escapeHtml(routeNames)}</div>
         `);
         
         marker.on('click', () => {
@@ -1892,17 +1946,17 @@ function updateMapMarkers() {
 
         let capacityLine = '';
         if (capacity) {
-            capacityLine = `<div class="popup-stop-routes ${capacity.className}">${capacity.icon} ${capacity.text}</div>`;
+            capacityLine = `<div class="popup-stop-routes ${escapeHtml(capacity.className)}">${escapeHtml(capacity.icon)} ${escapeHtml(capacity.text)}</div>`;
         }
 
         let nextStopLine = '';
         if (nextStop && nextStop.label) {
-            nextStopLine = `<div class="popup-stop-routes" style="color: var(--text-muted); font-size: 0.8rem;">Next: ${nextStop.label}</div>`;
+            nextStopLine = `<div class="popup-stop-routes" style="color: var(--text-muted); font-size: 0.8rem;">Next: ${escapeHtml(nextStop.label)}</div>`;
         }
 
         marker.bindPopup(`
-            <div class="popup-stop-name">${route.label || 'Unknown Route'}</div>
-            <div class="popup-stop-routes">${vehicleName}</div>
+            <div class="popup-stop-name">${escapeHtml(route.label || 'Unknown Route')}</div>
+            <div class="popup-stop-routes">${escapeHtml(vehicleName)}</div>
             ${nextStopLine}
             ${capacityLine}
         `);
@@ -1932,12 +1986,12 @@ function showMapStopInfo(stop) {
 
             let capacityHtml = '';
             if (capacity) {
-                capacityHtml = `<span class="arrival-capacity ${capacity.className}" title="${capacity.text}">${capacity.icon}</span>`;
+                capacityHtml = `<span class="arrival-capacity ${escapeHtml(capacity.className)}" title="${escapeHtml(capacity.text)}">${escapeHtml(capacity.icon)}</span>`;
             }
 
             let nextStopHtml = '';
             if (arr.nextStop && arr.nextStop.label) {
-                nextStopHtml = `<span class="arrival-next-stop">Next: ${arr.nextStop.label}</span>`;
+                nextStopHtml = `<span class="arrival-next-stop">Next: ${escapeHtml(arr.nextStop.label)}</span>`;
             }
 
             return `
@@ -1945,13 +1999,13 @@ function showMapStopInfo(stop) {
                     <div class="arrival-route-info">
                         <div class="route-badge" style="background: ${color}20">
                             <span class="dot" style="background: ${color}"></span>
-                            <span class="name">${arr.route.label}</span>
+                            <span class="name">${escapeHtml(arr.route.label)}</span>
                         </div>
                         ${nextStopHtml}
                     </div>
                     <div class="arrival-info">
                         ${capacityHtml}
-                        <span class="arrival-eta ${eta.className}">${eta.text}</span>
+                        <span class="arrival-eta ${escapeHtml(eta.className)}">${escapeHtml(eta.text)}</span>
                     </div>
                 </div>
             `;
@@ -1961,7 +2015,7 @@ function showMapStopInfo(stop) {
     overlay.innerHTML = `
         <div class="map-stop-info">
             <div class="map-stop-info-header">
-                <span class="map-stop-info-name">${stop.label}</span>
+                <span class="map-stop-info-name">${escapeHtml(stop.label)}</span>
                 <div class="map-stop-info-actions">
                     ${directionsUrl ? `
                         <a href="${directionsUrl}" target="_blank" rel="noopener" class="directions-link" title="Get directions">
@@ -2079,6 +2133,7 @@ const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
  * Cache routes and stops to localStorage for off-hours use
+ * Returns true on success, false on failure
  */
 function cacheRoutesAndStops() {
     try {
@@ -2092,8 +2147,32 @@ function cacheRoutesAndStops() {
         };
         localStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
         console.log('[CACHE] Saved routes/stops to localStorage');
+        return true;
     } catch (err) {
         console.warn('[CACHE] Failed to cache routes:', err);
+        // Detect specific error types for better user feedback
+        if (err.name === 'QuotaExceededError' || err.code === 22) {
+            // Storage quota exceeded - try to clear old cache and retry once
+            try {
+                localStorage.removeItem(CACHE_KEY);
+                const minimalData = {
+                    timestamp: Date.now(),
+                    routes: state.routes,
+                    stops: state.stops,
+                    routeShapes: [], // Skip shapes to reduce size
+                    routeStopSequences: [],
+                };
+                localStorage.setItem(CACHE_KEY, JSON.stringify(minimalData));
+                console.log('[CACHE] Saved minimal cache (without shapes)');
+                return true;
+            } catch {
+                showToast('Storage full - offline mode limited', 'warning');
+            }
+        } else if (err.name === 'SecurityError') {
+            // Private browsing mode or storage disabled
+            console.log('[CACHE] Storage not available (private browsing?)');
+        }
+        return false;
     }
 }
 
@@ -2159,10 +2238,7 @@ async function refreshData() {
             calculateNearbyStops();
 
             // Switch to normal refresh interval
-            if (state.refreshInterval) {
-                clearInterval(state.refreshInterval);
-                state.refreshInterval = setInterval(refreshData, CONFIG.REFRESH_INTERVAL_MS);
-            }
+            setRefreshInterval(CONFIG.REFRESH_INTERVAL_MS);
         } else {
             // Normal refresh - just fetch running buses
             state.runningBuses = await fetchRunningBuses();
@@ -2274,7 +2350,7 @@ async function init() {
             await renderNearbyStops();
 
             // Start auto-refresh only during operating hours
-            state.refreshInterval = setInterval(refreshData, CONFIG.REFRESH_INTERVAL_MS);
+            setRefreshInterval(CONFIG.REFRESH_INTERVAL_MS);
         } else {
             // Outside operating hours
             console.log('[INIT] Outside operating hours (7 AM - 7 PM Indiana time)');
@@ -2313,7 +2389,7 @@ async function init() {
             await renderNearbyStops();
 
             // Start a slower refresh to check when service resumes (every 5 min)
-            state.refreshInterval = setInterval(refreshData, 5 * 60 * 1000);
+            setRefreshInterval(5 * 60 * 1000);
         }
 
     } catch (err) {
