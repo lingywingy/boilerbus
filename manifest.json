@@ -2,8 +2,8 @@
   "name": "BoilerBus",
   "short_name": "BoilerBus",
   "description": "Unofficial real-time Purdue bus tracking - find nearby stops, view ETAs, and navigate campus transit",
-  "start_url": "/boilerbus/",
-  "scope": "/boilerbus/",
+  "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0D0D0D",
   "theme_color": "#1a1a1a",
@@ -74,12 +74,12 @@
   "shortcuts": [
     {
       "name": "Nearby Stops",
-      "url": "/boilerbus/?view=nearby",
+      "url": "/?view=nearby",
       "description": "View nearby bus stops"
     },
     {
       "name": "Map View",
-      "url": "/boilerbus/?view=map",
+      "url": "/?view=map",
       "description": "Open the transit map"
     }
   ],
