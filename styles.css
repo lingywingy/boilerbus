@@ -58,10 +58,16 @@
     --transition-fast: 150ms ease;
     --transition-normal: 250ms ease;
     --transition-slow: 400ms cubic-bezier(0.16, 1, 0.3, 1);
-    
+
     /* Safe Areas */
     --safe-top: env(safe-area-inset-top, 0px);
     --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+    /* Additional semantic colors */
+    --border-color: var(--dust);
+    --bg-card-hover: var(--bg-elevated);
+    --font-main: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+    --accent-dim: rgba(206, 184, 136, 0.15);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -306,16 +312,19 @@ body {
     border-radius: var(--radius-lg);
     padding: 16px;
     cursor: pointer;
-    transition: transform var(--transition-fast), background var(--transition-fast);
+    transition: transform var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
     animation: fadeInUp 400ms ease backwards;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .stop-card:hover {
     background: var(--bg-elevated);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
 
 .stop-card:active {
     transform: scale(0.98);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
 }
 
 .stop-card-header {
@@ -536,6 +545,7 @@ body {
     padding: 16px;
     margin-bottom: 12px;
     animation: fadeInUp 300ms ease backwards;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .arrival-card-header {
@@ -629,15 +639,17 @@ body {
 /* Clickable arrival cards */
 .arrival-card.clickable {
     cursor: pointer;
-    transition: transform var(--transition-fast), background var(--transition-fast);
+    transition: transform var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .arrival-card.clickable:hover {
     background: var(--bg-elevated);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .arrival-card.clickable:active {
     transform: scale(0.98);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 }
 
 .arrival-card-action {
@@ -913,7 +925,7 @@ body {
 }
 
 .route-filter-item.active {
-    background: var(--purdue-gold-10);
+    background: var(--accent-dim);
 }
 
 .route-filter-item.all-routes {
@@ -938,7 +950,7 @@ body {
 .route-filter-check {
     width: 16px;
     height: 16px;
-    color: var(--purdue-gold);
+    color: var(--accent);
     opacity: 0;
 }
 
@@ -963,8 +975,9 @@ body {
     background: var(--bg-card);
     border-radius: var(--radius-lg);
     padding: 16px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
     animation: slideUp 300ms ease;
+    border: 1px solid var(--dust);
 }
 
 .map-stop-info-header {
@@ -1220,6 +1233,14 @@ body {
 
 .toast.toast-success {
     border-left: 3px solid var(--arriving);
+}
+
+.toast.toast-warning {
+    border-left: 3px solid var(--soon);
+}
+
+.toast.toast-info {
+    border-left: 3px solid var(--later);
 }
 
 .toast-message {
@@ -1772,4 +1793,51 @@ body {
 
 .welcome-btn-primary:hover {
     background: var(--gold-light);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Off-Hours Banner
+   ─────────────────────────────────────────────────────────────────────────────*/
+
+.off-hours-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: linear-gradient(135deg, rgba(206, 184, 136, 0.15) 0%, rgba(206, 184, 136, 0.08) 100%);
+    border-bottom: 1px solid rgba(206, 184, 136, 0.2);
+    color: var(--gold);
+    font-size: 0.875rem;
+    animation: slideDown 0.3s ease;
+}
+
+.off-hours-banner svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    opacity: 0.8;
+}
+
+.off-hours-banner strong {
+    color: var(--gold-light);
+}
+
+.off-hours-times {
+    opacity: 0.6;
+    font-size: 0.75rem;
+    margin-left: 4px;
+    padding-left: 8px;
+    border-left: 1px solid rgba(206, 184, 136, 0.3);
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-100%);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }

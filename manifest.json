@@ -74,12 +74,12 @@
   "shortcuts": [
     {
       "name": "Nearby Stops",
-      "url": "/BoilerBus/?view=nearby",
+      "url": "/boilerbus/?view=nearby",
       "description": "View nearby bus stops"
     },
     {
       "name": "Map View",
-      "url": "/BoilerBus/?view=map",
+      "url": "/boilerbus/?view=map",
       "description": "Open the transit map"
     }
   ],

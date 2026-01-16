@@ -49,6 +49,14 @@ const CONFIG = {
 
     // [DISABLED] Maximum ETA to display (minutes) - arrivals beyond this are considered "not running"
     // MAX_DISPLAY_ETA_MINUTES: window.APP_CONFIG?.MAX_DISPLAY_ETA_MINUTES || 60,
+
+    // Operating hours (Indiana time - America/Indiana/Indianapolis)
+    OPERATING_HOURS_START: window.APP_CONFIG?.OPERATING_HOURS_START || 7,  // 7 AM
+    OPERATING_HOURS_END: window.APP_CONFIG?.OPERATING_HOURS_END || 19,     // 7 PM (19:00)
+    TIMEZONE: window.APP_CONFIG?.TIMEZONE || 'America/Indiana/Indianapolis',
+
+    // Maximum ETA to display - arrivals beyond this are hidden
+    MAX_DISPLAY_ETA_MINUTES: window.APP_CONFIG?.MAX_DISPLAY_ETA_MINUTES || 100,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -66,7 +74,8 @@ const state = {
     stops: [],
     runningBuses: [],
     nearbyStops: [],
-    routeStopSequences: new Map(), // Maps routeId -> ordered array of stopIds
+    routeStopSequences: new Map(), // Maps routeId -> ordered array of stops with coords
+    routeShapes: new Map(), // Maps routeId -> ordered array of path coordinates from API
     
     // UI State
     currentView: 'nearby',
@@ -199,6 +208,72 @@ function debounce(fn, delay) {
     };
 }
 
+/**
+ * Get current time in Indiana timezone
+ * Supports DEBUG_TIME_OVERRIDE from server.py for testing
+ * @returns {Object} { hours, minutes, date }
+ */
+function getIndianaTime() {
+    // Check for debug time override (set by server.py --time flag)
+    if (window.DEBUG_TIME_OVERRIDE) {
+        const [hours, minutes] = window.DEBUG_TIME_OVERRIDE.split(':').map(Number);
+        return { hours, minutes, date: new Date() };
+    }
+
+    const now = new Date();
+    // Get the time string in Indiana timezone
+    const options = {
+        timeZone: CONFIG.TIMEZONE,
+        hour: 'numeric',
+        minute: 'numeric',
+        hour12: false
+    };
+    const timeStr = now.toLocaleString('en-US', options);
+    const [hours, minutes] = timeStr.split(':').map(Number);
+    return { hours, minutes, date: now };
+}
+
+/**
+ * Check if buses are currently operating (7 AM - 7 PM Indiana time)
+ * @returns {Object} { isOperating, currentHour, minutesUntilStart, nextStartTime }
+ */
+function checkOperatingHours() {
+    const { hours, minutes } = getIndianaTime();
+    const isOperating = hours >= CONFIG.OPERATING_HOURS_START && hours < CONFIG.OPERATING_HOURS_END;
+
+    let minutesUntilStart = 0;
+    let nextStartTime = '';
+
+    if (!isOperating) {
+        // Calculate time until 7 AM
+        if (hours >= CONFIG.OPERATING_HOURS_END) {
+            // After 7 PM - next service is tomorrow at 7 AM
+            const hoursUntil = (24 - hours) + CONFIG.OPERATING_HOURS_START;
+            minutesUntilStart = (hoursUntil * 60) - minutes;
+        } else {
+            // Before 7 AM - service starts today at 7 AM
+            const hoursUntil = CONFIG.OPERATING_HOURS_START - hours;
+            minutesUntilStart = (hoursUntil * 60) - minutes;
+        }
+
+        // Format next start time
+        const hoursLeft = Math.floor(minutesUntilStart / 60);
+        const minsLeft = minutesUntilStart % 60;
+        if (hoursLeft > 0) {
+            nextStartTime = `${hoursLeft}h ${minsLeft}m`;
+        } else {
+            nextStartTime = `${minsLeft} min`;
+        }
+    }
+
+    return {
+        isOperating,
+        currentHour: hours,
+        minutesUntilStart,
+        nextStartTime,
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // API Functions
 // ═══════════════════════════════════════════════════════════════════════════
@@ -313,6 +388,7 @@ function parseRoutesAndStops(payload) {
     const routes = [];
     const allStops = new Map();
     const routeStopSequences = new Map(); // For ETA calculation
+    const routeShapes = new Map(); // For map display and position tracking
     const seen = new Set();
     
     for (const route of routesList) {
@@ -392,7 +468,22 @@ function parseRoutesAndStops(payload) {
         
         // Store stop sequence for this route
         routeStopSequences.set(routeId || routeLabel, stopSequence);
-        
+
+        // Extract route shape from API (orderedCoordinates)
+        const routeShape = route.routeShape;
+        if (routeShape && Array.isArray(routeShape.orderedCoordinates)) {
+            const shapeCoords = routeShape.orderedCoordinates
+                .filter(c => c.latitude && c.longitude)
+                .map(c => ({ latitude: c.latitude, longitude: c.longitude }));
+            if (shapeCoords.length > 0) {
+                routeShapes.set(routeId || routeLabel, {
+                    coordinates: shapeCoords,
+                    colour: routeColour,
+                    label: routeLabel,
+                });
+            }
+        }
+
         routes.push({
             id: routeId || routeLabel,
             label: routeLabel,
@@ -400,9 +491,10 @@ function parseRoutesAndStops(payload) {
             stops,
         });
     }
-    
-    // Store route sequences in state for ETA calculation
+
+    // Store route sequences and shapes in state
     state.routeStopSequences = routeStopSequences;
+    state.routeShapes = routeShapes;
     
     return {
         routes,
@@ -742,7 +834,63 @@ function calculateRouteAwareETA(bus, targetStop, routeId) {
 }
 
 /**
- * Get the next stop for a bus based on its current position
+ * Calculate perpendicular distance from a point to a line segment
+ * Returns the distance and how far along the segment (0-1) the closest point is
+ */
+function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lengthSq = dx * dx + dy * dy;
+
+    if (lengthSq === 0) {
+        // Segment is a point
+        return { distance: Math.sqrt((px - x1) ** 2 + (py - y1) ** 2), t: 0 };
+    }
+
+    // Project point onto line, clamped to segment
+    let t = ((px - x1) * dx + (py - y1) * dy) / lengthSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const closestX = x1 + t * dx;
+    const closestY = y1 + t * dy;
+    const distance = Math.sqrt((px - closestX) ** 2 + (py - closestY) ** 2);
+
+    return { distance, t };
+}
+
+/**
+ * Find the position of a point along a route shape path.
+ * Returns the segment index and the cumulative distance from the start.
+ */
+function findPositionOnRoute(lat, lon, shapeCoords) {
+    let bestSegment = 0;
+    let bestDistance = Infinity;
+    let bestT = 0;
+
+    for (let i = 0; i < shapeCoords.length - 1; i++) {
+        const a = shapeCoords[i];
+        const b = shapeCoords[i + 1];
+
+        const result = pointToSegmentDistance(
+            lon, lat,
+            a.longitude, a.latitude,
+            b.longitude, b.latitude
+        );
+
+        if (result.distance < bestDistance) {
+            bestDistance = result.distance;
+            bestSegment = i;
+            bestT = result.t;
+        }
+    }
+
+    // Return a "progress" value: segment index + fraction along that segment
+    return bestSegment + bestT;
+}
+
+/**
+ * Get the next stop for a bus based on its current position along the route shape.
+ * Uses the ordered route shape coordinates to determine exact position and direction.
  * @returns {Object|null} { id, label } of the next stop, or null if unknown
  */
 function getNextStopForBus(bus) {
@@ -754,28 +902,95 @@ function getNextStopForBus(bus) {
 
     if (!busLat || !busLon || !routeId) return null;
 
-    // Get the stop sequence for this route
+    // Get the stop sequence and route shape for this route
     const stopSequence = state.routeStopSequences.get(routeId);
+    const routeShape = state.routeShapes.get(routeId);
+
     if (!stopSequence || stopSequence.length < 2) return null;
 
-    // Find which stop the bus is closest to
-    let closestIndex = 0;
-    let closestDistance = Infinity;
+    // If we have a detailed route shape, use it for precise positioning
+    if (routeShape && routeShape.coordinates && routeShape.coordinates.length > 1) {
+        const shapeCoords = routeShape.coordinates;
 
-    for (let i = 0; i < stopSequence.length; i++) {
-        const stop = stopSequence[i];
-        const dist = haversineDistance(busLat, busLon, stop.latitude, stop.longitude);
-        if (dist < closestDistance) {
-            closestDistance = dist;
-            closestIndex = i;
+        // Find where the bus is on the route shape
+        const busProgress = findPositionOnRoute(busLat, busLon, shapeCoords);
+
+        // Find where each stop is on the route shape
+        const stopPositions = stopSequence.map(stop => ({
+            stop,
+            progress: findPositionOnRoute(stop.latitude, stop.longitude, shapeCoords)
+        }));
+
+        // Find the first stop that comes after the bus's current position
+        // For loop routes, we may need to wrap around
+        let nextStop = null;
+        let minProgressAhead = Infinity;
+
+        for (const sp of stopPositions) {
+            let progressAhead = sp.progress - busProgress;
+
+            // Handle wraparound for loop routes (stop is "behind" but actually ahead)
+            if (progressAhead < 0) {
+                progressAhead += shapeCoords.length;
+            }
+
+            // Must be ahead (progress > 0) but also reasonably close
+            // Use a small threshold to avoid selecting a stop we just passed
+            if (progressAhead > 0.5 && progressAhead < minProgressAhead) {
+                minProgressAhead = progressAhead;
+                nextStop = sp.stop;
+            }
+        }
+
+        // If no stop found ahead, take the first stop (loop wraparound)
+        if (!nextStop) {
+            nextStop = stopSequence[0];
+        }
+
+        const fullStop = state.stops.find(s => s.id === nextStop.id);
+        return {
+            id: nextStop.id,
+            label: fullStop?.label || 'Next stop',
+        };
+    }
+
+    // Fallback: use simple stop-to-stop segment matching
+    let bestSegmentEnd = 1;
+    let bestDistance = Infinity;
+
+    for (let i = 0; i < stopSequence.length - 1; i++) {
+        const stopA = stopSequence[i];
+        const stopB = stopSequence[i + 1];
+
+        const result = pointToSegmentDistance(
+            busLon, busLat,
+            stopA.longitude, stopA.latitude,
+            stopB.longitude, stopB.latitude
+        );
+
+        if (result.distance < bestDistance) {
+            bestDistance = result.distance;
+            bestSegmentEnd = i + 1;
         }
     }
 
-    // The next stop is the one after the closest (wrapping around for loop routes)
-    const nextIndex = (closestIndex + 1) % stopSequence.length;
-    const nextStopData = stopSequence[nextIndex];
+    // For loop routes, check segment from last stop back to first
+    if (stopSequence.length > 2) {
+        const lastStop = stopSequence[stopSequence.length - 1];
+        const firstStop = stopSequence[0];
 
-    // Find the full stop info from state.stops
+        const result = pointToSegmentDistance(
+            busLon, busLat,
+            lastStop.longitude, lastStop.latitude,
+            firstStop.longitude, firstStop.latitude
+        );
+
+        if (result.distance < bestDistance) {
+            bestSegmentEnd = 0;
+        }
+    }
+
+    const nextStopData = stopSequence[bestSegmentEnd];
     const fullStop = state.stops.find(s => s.id === nextStopData.id);
 
     return {
@@ -913,13 +1128,9 @@ async function fetchArrivalsForStop(stopId) {
                     ? officialEta
                     : calculatedEta;
 
-                // Use busTowards from API as the next stop direction, fall back to calculated
-                let nextStop = null;
-                if (route.busTowards) {
-                    nextStop = { label: route.busTowards };
-                } else {
-                    nextStop = getNextStopForBus(bus.shiftSolutionId ? bus : { ...entry, route, location: bus.location });
-                }
+                // Calculate the actual next stop for this bus based on its position
+                // Note: route.busTowards is the route direction/terminus, not the next stop
+                const nextStop = getNextStopForBus(bus.shiftSolutionId ? bus : { ...entry, route, location: bus.location });
 
                 // Parse capacity from API response (entry.availableCapacities) or from running bus
                 const capacity = parseCapacityFromApi(entry.availableCapacities) || bus.capacity || null;
@@ -1004,6 +1215,46 @@ function updateHeaderTitle(title) {
 // Nearby Stops View
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Show floating off-hours banner pill
+ */
+function showOffHoursBanner() {
+    // Remove existing banner if any
+    hideOffHoursBanner();
+
+    const { nextStartTime } = checkOperatingHours();
+
+    const banner = document.createElement('div');
+    banner.id = 'off-hours-banner';
+    banner.className = 'off-hours-banner';
+    banner.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/>
+        </svg>
+        <span>Buses resume in <strong>${nextStartTime}</strong></span>
+        <span class="off-hours-times">7 AM – 7 PM</span>
+    `;
+
+    // Insert after header
+    const mainApp = $('#main-app');
+    const header = mainApp.querySelector('.header');
+    if (header && header.nextSibling) {
+        header.parentNode.insertBefore(banner, header.nextSibling);
+    } else {
+        mainApp.prepend(banner);
+    }
+}
+
+/**
+ * Hide the off-hours banner
+ */
+function hideOffHoursBanner() {
+    const existing = $('#off-hours-banner');
+    if (existing) {
+        existing.remove();
+    }
+}
+
 async function renderNearbyStops() {
     const container = $('#stops-list');
     container.innerHTML = '';
@@ -1023,18 +1274,29 @@ async function renderNearbyStops() {
         return;
     }
 
-    // Fetch official ETAs for all nearby stops in parallel
-    const arrivalsPromises = state.nearbyStops.map(stop =>
-        fetchArrivalsForStop(stop.id).catch(() => getNextArrivalsForStop(stop.id))
-    );
-    const allArrivals = await Promise.all(arrivalsPromises);
+    // Check if we should fetch ETAs (only during operating hours)
+    const { isOperating } = checkOperatingHours();
 
-    // Render cards with official ETAs
-    state.nearbyStops.forEach((stop, index) => {
-        const arrivals = allArrivals[index];
-        const card = createStopCard(stop, arrivals);
-        container.appendChild(card);
-    });
+    if (isOperating) {
+        // Fetch official ETAs for all nearby stops in parallel
+        const arrivalsPromises = state.nearbyStops.map(stop =>
+            fetchArrivalsForStop(stop.id).catch(() => getNextArrivalsForStop(stop.id))
+        );
+        const allArrivals = await Promise.all(arrivalsPromises);
+
+        // Render cards with official ETAs
+        state.nearbyStops.forEach((stop, index) => {
+            const arrivals = allArrivals[index];
+            const card = createStopCard(stop, arrivals);
+            container.appendChild(card);
+        });
+    } else {
+        // Off-hours: render cards without ETAs (empty arrivals)
+        state.nearbyStops.forEach(stop => {
+            const card = createStopCard(stop, []);
+            container.appendChild(card);
+        });
+    }
 }
 
 /**
@@ -1088,11 +1350,16 @@ function createStopCard(stop, arrivals) {
 
     const distanceStr = formatDistance(stop.distance);
 
+    // Filter out arrivals with ETA > 100 minutes
+    const filteredArrivals = arrivals.filter(arr =>
+        arr.etaMinutes !== null && arr.etaMinutes <= CONFIG.MAX_DISPLAY_ETA_MINUTES
+    );
+
     let arrivalsHtml = '';
-    if (arrivals.length === 0) {
+    if (filteredArrivals.length === 0) {
         arrivalsHtml = '<p class="no-arrivals">No buses currently en route</p>';
     } else {
-        const displayArrivals = arrivals.slice(0, 3);
+        const displayArrivals = filteredArrivals.slice(0, 3);
         arrivalsHtml = displayArrivals.map(arr => {
             const eta = formatETA(arr.etaMinutes);
             const color = normalizeColor(arr.route.colour);
@@ -1149,50 +1416,64 @@ function createStopCard(stop, arrivals) {
 async function showStopDetail(stop) {
     state.selectedStop = stop;
     state.currentView = 'detail';
-    
+
     // Update UI
     updateHeaderTitle(stop.label);
     $('#btn-back').classList.remove('hidden');
-    
+
     // Switch view
     switchView('detail');
-    
-    // Show loading state
-    const container = $('#stop-detail');
-    container.innerHTML = `
-        <div class="detail-header">
-            <h2 class="detail-stop-name">${stop.label}</h2>
-            <div class="detail-meta">
-                <span class="detail-meta-item">
-                    <svg viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
-                    </svg>
-                    ${formatDistance(stop.distance || 0)} away
-                </span>
+
+    // Check operating hours before fetching
+    const { isOperating } = checkOperatingHours();
+
+    if (isOperating) {
+        // Show loading state
+        const container = $('#stop-detail');
+        container.innerHTML = `
+            <div class="detail-header">
+                <h2 class="detail-stop-name">${stop.label}</h2>
+                <div class="detail-meta">
+                    <span class="detail-meta-item">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                        </svg>
+                        ${formatDistance(stop.distance || 0)} away
+                    </span>
+                </div>
             </div>
-        </div>
-        <div class="detail-section">
-            <h4 class="detail-section-title">Loading arrivals...</h4>
-            <div class="skeleton skeleton-card"></div>
-            <div class="skeleton skeleton-card"></div>
-        </div>
-    `;
-    
-    // Fetch arrivals
-    try {
-        const arrivals = await fetchArrivalsForStop(stop.id);
-        state.selectedStopArrivals = arrivals;
-        renderStopDetail(stop, arrivals);
-    } catch (err) {
-        // Use calculated arrivals as fallback
-        const arrivals = getNextArrivalsForStop(stop.id);
-        state.selectedStopArrivals = arrivals;
-        renderStopDetail(stop, arrivals);
+            <div class="detail-section">
+                <h4 class="detail-section-title">Loading arrivals...</h4>
+                <div class="skeleton skeleton-card"></div>
+                <div class="skeleton skeleton-card"></div>
+            </div>
+        `;
+
+        // Fetch arrivals during operating hours
+        try {
+            const arrivals = await fetchArrivalsForStop(stop.id);
+            state.selectedStopArrivals = arrivals;
+            renderStopDetail(stop, arrivals);
+        } catch (err) {
+            // Use calculated arrivals as fallback
+            const arrivals = getNextArrivalsForStop(stop.id);
+            state.selectedStopArrivals = arrivals;
+            renderStopDetail(stop, arrivals);
+        }
+    } else {
+        // Off-hours: show stop info without live arrivals (no loading state)
+        state.selectedStopArrivals = [];
+        renderStopDetail(stop, []);
     }
 }
 
 function renderStopDetail(stop, arrivals) {
     const container = $('#stop-detail');
+
+    // Filter out arrivals with ETA > 100 minutes
+    const filteredArrivals = arrivals.filter(arr =>
+        arr.etaMinutes !== null && arr.etaMinutes <= CONFIG.MAX_DISPLAY_ETA_MINUTES
+    );
 
     // Routes serving this stop
     const routesBadges = (stop.routes || []).map(r => {
@@ -1205,22 +1486,23 @@ function renderStopDetail(stop, arrivals) {
 
     // Arrivals
     let arrivalsHtml = '';
-    if (arrivals.length === 0) {
+    if (filteredArrivals.length === 0) {
         arrivalsHtml = `
             <div class="empty-state">
-                <svg class="empty-state-icon" viewBox="0 0 48 48" fill="currentColor">
-                    <rect x="8" y="12" width="32" height="24" rx="4"/>
-                    <rect x="12" y="16" width="8" height="6" rx="1" fill="var(--bg-primary)"/>
-                    <rect x="28" y="16" width="8" height="6" rx="1" fill="var(--bg-primary)"/>
-                    <circle cx="14" cy="38" r="3"/>
-                    <circle cx="34" cy="38" r="3"/>
+                <svg class="empty-state-icon" viewBox="0 0 1024 1024" fill="currentColor">
+                    <g transform="translate(102.4, 102.4) scale(0.8)">
+                        <path d="M126.03 744.104H72.219c-17.312 0-31.263-13.802-31.263-30.72v-488.11c0-16.912 13.955-30.72 31.263-30.72h879.565c17.311 0 31.252 13.801 31.252 30.72v488.11c0 16.926-13.937 30.72-31.252 30.72h-42.639c-11.311 0-20.48 9.169-20.48 20.48s9.169 20.48 20.48 20.48h42.639c39.843 0 72.212-32.038 72.212-71.68v-488.11c0-39.635-32.373-71.68-72.212-71.68H72.219c-39.833 0-72.223 32.049-72.223 71.68v488.11c0 39.639 32.387 71.68 72.223 71.68h53.811c11.311 0 20.48-9.169 20.48-20.48s-9.169-20.48-20.48-20.48z"/>
+                        <path d="M693.76 744.104H334.848c-11.311 0-20.48 9.169-20.48 20.48s9.169 20.48 20.48 20.48H693.76c11.311 0 20.48-9.169 20.48-20.48s-9.169-20.48-20.48-20.48zM993.28 467.83h-97.812c-16.962 0-30.72-13.758-30.72-30.72V193.531c0-11.311-9.169-20.48-20.48-20.48s-20.48 9.169-20.48 20.48V437.11c0 39.583 32.097 71.68 71.68 71.68h97.812c11.311 0 20.48-9.169 20.48-20.48s-9.169-20.48-20.48-20.48z"/>
+                        <path d="M884.53 764.584c0-45.238-36.679-81.92-81.92-81.92-45.234 0-81.92 36.686-81.92 81.92 0 45.241 36.682 81.92 81.92 81.92 45.245 0 81.92-36.675 81.92-81.92zm40.96 0c0 67.866-55.014 122.88-122.88 122.88-67.859 0-122.88-55.017-122.88-122.88 0-67.856 55.024-122.88 122.88-122.88 67.863 0 122.88 55.021 122.88 122.88zm-611.12 0c0-45.234-36.686-81.92-81.92-81.92-45.241 0-81.92 36.682-81.92 81.92 0 45.245 36.675 81.92 81.92 81.92 45.238 0 81.92-36.679 81.92-81.92zm40.96 0c0 67.863-55.021 122.88-122.88 122.88-67.866 0-122.88-55.014-122.88-122.88 0-67.859 55.017-122.88 122.88-122.88 67.856 0 122.88 55.024 122.88 122.88z"/>
+                        <path d="M725.76 468.085V292.633h-102.4v175.452h102.4zm0 40.96h-102.4c-22.616 0-40.96-18.344-40.96-40.96V292.633c0-22.624 18.342-40.96 40.96-40.96h102.4c22.618 0 40.96 18.336 40.96 40.96v175.452c0 22.616-18.344 40.96-40.96 40.96zm-243.825-40.96V292.633h-102.4v175.452h102.4zm0 40.96h-102.4c-22.616 0-40.96-18.344-40.96-40.96V292.633c0-22.624 18.342-40.96 40.96-40.96h102.4c22.618 0 40.96 18.336 40.96 40.96v175.452c0 22.616-18.344 40.96-40.96 40.96zm-243.825-40.96V292.633h-102.4v175.452h102.4zm0 40.96h-102.4c-22.616 0-40.96-18.344-40.96-40.96V292.633c0-22.624 18.342-40.96 40.96-40.96h102.4c22.618 0 40.96 18.336 40.96 40.96v175.452c0 22.616-18.344 40.96-40.96 40.96z"/>
+                    </g>
                 </svg>
                 <h3 class="empty-state-title">No buses en route</h3>
                 <p class="empty-state-message">Check back soon or view the map for all active buses.</p>
             </div>
         `;
     } else {
-        arrivalsHtml = arrivals.map((arr, i) => {
+        arrivalsHtml = filteredArrivals.map((arr, i) => {
             const eta = formatETA(arr.etaMinutes);
             const color = normalizeColor(arr.route.colour);
             const vehicle = arr.vehicle || {};
@@ -1297,9 +1579,7 @@ function renderStopDetail(stop, arrivals) {
                     <div class="arrival-details">
                         <span class="arrival-detail-item">
                             <svg viewBox="0 0 24 24" fill="currentColor">
-                                <rect x="4" y="6" width="16" height="12" rx="2"/>
-                                <circle cx="8" cy="20" r="2"/>
-                                <circle cx="16" cy="20" r="2"/>
+                                <path d="M4 16c0 .88.39 1.67 1 2.22V20c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h8v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8 .5-8 4v10zm3.5 1c-.83 0-1.5-.67-1.5-1.5S6.67 14 7.5 14s1.5.67 1.5 1.5S8.33 17 7.5 17zm9 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm1.5-6H6V6h12v5z"/>
                             </svg>
                             ${vehicleName}
                         </span>
@@ -1507,24 +1787,24 @@ function updateMapMarkers() {
     
     const filterRouteId = state.selectedRouteFilter;
 
-    // Draw route polylines from pre-generated paths (road-following geometry via OSRM)
-    if (typeof ROUTE_PATHS !== 'undefined') {
-        for (const [routeId, routeData] of Object.entries(ROUTE_PATHS)) {
-            // Skip if filtering to a different route
-            if (filterRouteId && routeId !== filterRouteId) continue;
+    // Draw route polylines from API-provided route shapes
+    for (const [routeId, shapeData] of state.routeShapes) {
+        // Skip if filtering to a different route
+        if (filterRouteId && routeId !== filterRouteId) continue;
 
-            if (routeData.path && routeData.path.length > 1) {
-                const color = normalizeColor(routeData.colour);
-                const polyline = L.polyline(routeData.path, {
-                    color: color,
-                    weight: 4,
-                    opacity: 0.7,
-                    lineCap: 'round',
-                    lineJoin: 'round',
-                }).addTo(state.map);
+        if (shapeData.coordinates && shapeData.coordinates.length > 1) {
+            // Convert { latitude, longitude } to [lat, lng] for Leaflet
+            const path = shapeData.coordinates.map(c => [c.latitude, c.longitude]);
+            const color = normalizeColor(shapeData.colour);
+            const polyline = L.polyline(path, {
+                color: color,
+                weight: 4,
+                opacity: 0.7,
+                lineCap: 'round',
+                lineJoin: 'round',
+            }).addTo(state.map);
 
-                state.routePolylines.push(polyline);
-            }
+            state.routePolylines.push(polyline);
         }
     }
 
@@ -1552,8 +1832,7 @@ function updateMapMarkers() {
             html: `
                 <div class="stop-marker" style="border-color: ${stopColor}">
                     <svg viewBox="0 0 24 24" fill="${stopColor}">
-                        <rect x="6" y="2" width="12" height="18" rx="2"/>
-                        <circle cx="12" cy="22" r="2"/>
+                        <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
                     </svg>
                 </div>
             `,
@@ -1595,9 +1874,7 @@ function updateMapMarkers() {
             html: `
                 <div class="bus-marker" style="background: ${color}">
                     <svg viewBox="0 0 24 24" fill="currentColor">
-                        <rect x="4" y="6" width="16" height="12" rx="2"/>
-                        <circle cx="8" cy="20" r="2"/>
-                        <circle cx="16" cy="20" r="2"/>
+                        <path d="M4 16c0 .88.39 1.67 1 2.22V20c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h8v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1.78c.61-.55 1-1.34 1-2.22V6c0-3.5-3.58-4-8-4s-8 .5-8 4v10zm3.5 1c-.83 0-1.5-.67-1.5-1.5S6.67 14 7.5 14s1.5.67 1.5 1.5S8.33 17 7.5 17zm9 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm1.5-6H6V6h12v5z"/>
                     </svg>
                 </div>
             `,
@@ -1779,20 +2056,106 @@ function goBack() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Routes/Stops Caching (for off-hours browsing)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CACHE_KEY = 'boilerbus_routes_cache';
+const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Cache routes and stops to localStorage for off-hours use
+ */
+function cacheRoutesAndStops() {
+    try {
+        const cacheData = {
+            timestamp: Date.now(),
+            routes: state.routes,
+            stops: state.stops,
+            // Convert Maps to arrays for JSON serialization
+            routeShapes: Array.from(state.routeShapes.entries()),
+            routeStopSequences: Array.from(state.routeStopSequences.entries()),
+        };
+        localStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+        console.log('[CACHE] Saved routes/stops to localStorage');
+    } catch (err) {
+        console.warn('[CACHE] Failed to cache routes:', err);
+    }
+}
+
+/**
+ * Load cached routes and stops from localStorage
+ * @returns {boolean} true if cache was loaded successfully
+ */
+function loadCachedRoutesAndStops() {
+    try {
+        const cached = localStorage.getItem(CACHE_KEY);
+        if (!cached) return false;
+
+        const cacheData = JSON.parse(cached);
+
+        // Check cache age
+        const age = Date.now() - cacheData.timestamp;
+        if (age > CACHE_MAX_AGE_MS) {
+            console.log('[CACHE] Cache expired, will refresh');
+            localStorage.removeItem(CACHE_KEY);
+            return false;
+        }
+
+        // Restore state
+        state.routes = cacheData.routes || [];
+        state.stops = cacheData.stops || [];
+        state.routeShapes = new Map(cacheData.routeShapes || []);
+        state.routeStopSequences = new Map(cacheData.routeStopSequences || []);
+
+        console.log(`[CACHE] Loaded ${state.routes.length} routes, ${state.stops.length} stops from cache`);
+        return state.routes.length > 0;
+    } catch (err) {
+        console.warn('[CACHE] Failed to load cache:', err);
+        return false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Refresh & Data Loading
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function refreshData() {
     const refreshBtn = $('#btn-refresh');
     refreshBtn.classList.add('refreshing');
-    
+
+    // Check operating hours - skip API calls if outside 7 AM - 7 PM Indiana time
+    const { isOperating } = checkOperatingHours();
+    if (!isOperating) {
+        console.log('[REFRESH] Outside operating hours, skipping API calls');
+        // Update the banner with current time until service
+        showOffHoursBanner();
+        refreshBtn.classList.remove('refreshing');
+        return;
+    }
+
+    // Hide off-hours banner if it was showing (service just resumed)
+    hideOffHoursBanner();
+
     try {
-        // Fetch running buses
-        state.runningBuses = await fetchRunningBuses();
-        
+        // If we don't have route data yet (was off-hours at init), load it now
+        if (state.routes.length === 0) {
+            console.log('[REFRESH] Service resumed, loading initial data...');
+            await loadInitialData();
+            calculateNearbyStops();
+
+            // Switch to normal refresh interval
+            if (state.refreshInterval) {
+                clearInterval(state.refreshInterval);
+                state.refreshInterval = setInterval(refreshData, CONFIG.REFRESH_INTERVAL_MS);
+            }
+        } else {
+            // Normal refresh - just fetch running buses
+            state.runningBuses = await fetchRunningBuses();
+        }
+
         // Recalculate nearby stops
         calculateNearbyStops();
-        
+
         // Re-render current view
         if (state.currentView === 'nearby') {
             await renderNearbyStops();
@@ -1803,7 +2166,7 @@ async function refreshData() {
         } else if (state.currentView === 'map') {
             updateMapMarkers();
         }
-        
+
     } catch (err) {
         console.error('Refresh error:', err);
         showToast('Failed to refresh data', 'error');
@@ -1845,15 +2208,23 @@ async function loadInitialData() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function init() {
+    // Log debug settings if active
+    if (window.DEBUG_TIME_OVERRIDE) {
+        console.log(`[DEBUG] Time override active: ${window.DEBUG_TIME_OVERRIDE}`);
+    }
+    if (window.DEBUG_MOCK_ENABLED) {
+        console.log('[DEBUG] Mock API mode enabled');
+    }
+
     try {
         // Get user location
         setLoadingStatus('Getting your location...');
-        
+
         try {
             const location = await getCurrentLocation();
             state.userLat = location.lat;
             state.userLon = location.lon;
-            
+
             // Reverse geocode
             setLoadingStatus('Finding your address...');
             state.userAddress = await reverseGeocode(location.lat, location.lon);
@@ -1865,24 +2236,71 @@ async function init() {
             state.userAddress = 'Purdue University';
             showToast('Using default campus location', 'info');
         }
-        
+
         updateLocationBar();
-        
-        // Load data
-        await loadInitialData();
-        
-        // Calculate nearby stops
-        calculateNearbyStops();
-        
-        // Hide loading, show app
-        hideLoading();
 
-        // Render initial view
-        await renderNearbyStops();
+        // Check operating hours
+        const { isOperating } = checkOperatingHours();
 
-        // Start auto-refresh
-        state.refreshInterval = setInterval(refreshData, CONFIG.REFRESH_INTERVAL_MS);
-        
+        if (isOperating) {
+            // Load data normally during operating hours
+            await loadInitialData();
+
+            // Cache routes/stops for off-hours use
+            cacheRoutesAndStops();
+
+            // Calculate nearby stops
+            calculateNearbyStops();
+
+            // Hide loading, show app
+            hideLoading();
+
+            // Render initial view
+            await renderNearbyStops();
+
+            // Start auto-refresh only during operating hours
+            state.refreshInterval = setInterval(refreshData, CONFIG.REFRESH_INTERVAL_MS);
+        } else {
+            // Outside operating hours
+            console.log('[INIT] Outside operating hours (7 AM - 7 PM Indiana time)');
+
+            // Try to load cached routes/stops so users can still browse
+            const hasCached = loadCachedRoutesAndStops();
+
+            if (!hasCached) {
+                // No cache - need to fetch routes/stops once (but not running buses)
+                console.log('[INIT] No cached data, fetching routes/stops for offline browsing...');
+                setLoadingStatus('Loading route data...');
+                try {
+                    const { routes, stops } = await fetchRoutesAndStops();
+                    state.routes = routes;
+                    state.stops = stops;
+                    cacheRoutesAndStops();
+                    console.log(`[INIT] Cached ${routes.length} routes, ${stops.length} stops`);
+                } catch (err) {
+                    console.warn('[INIT] Could not fetch routes:', err);
+                }
+            } else {
+                console.log('[INIT] Using cached routes/stops');
+            }
+
+            // No running buses during off-hours
+            state.runningBuses = [];
+
+            // Calculate nearby stops (will show stops but no ETAs)
+            calculateNearbyStops();
+
+            // Hide loading, show app
+            hideLoading();
+
+            // Show the off-hours banner and nearby stops
+            showOffHoursBanner();
+            await renderNearbyStops();
+
+            // Start a slower refresh to check when service resumes (every 5 min)
+            state.refreshInterval = setInterval(refreshData, 5 * 60 * 1000);
+        }
+
     } catch (err) {
         console.error('Init error:', err);
         setLoadingStatus('Error loading data. Please refresh.');
