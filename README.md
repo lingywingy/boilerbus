@@ -2,7 +2,7 @@
 
 A Progressive Web App (PWA) for real-time Purdue University bus tracking. View nearby stops, live ETAs, bus locations on an interactive map, and get walking directions.
 
-I really dislike the official bus app, so I decided to reverse engineer the API endpoints for bus tracking and route info and make my own frontend. 
+I really dislike the official bus app, so I decided to reverse-engineer the API endpoints for bus tracking and route info and build my own frontend. 
 
 It felt like they intentionally designed it to be as confusing and slow to navigate as possible, requiring you to log in to your Purdue account and go through MFA just to check when the bus is coming.
 
@@ -51,11 +51,9 @@ python server.py --mock --time 14:00
 # Open http://localhost:8085
 ```
 
-No build step required - this is vanilla JavaScript with static hosting.
-
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Please feel free to submit a Pull Request.
 
 ## License
 
