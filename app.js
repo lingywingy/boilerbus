@@ -1888,15 +1888,22 @@ function updateMapMarkers() {
         const vehicle = bus.vehicle || {};
         const vehicleName = first(vehicle.displayName, vehicle.name) || 'Bus';
         const capacity = formatCapacity(bus.capacity);
-        
+        const nextStop = getNextStopForBus(bus);
+
         let capacityLine = '';
         if (capacity) {
             capacityLine = `<div class="popup-stop-routes ${capacity.className}">${capacity.icon} ${capacity.text}</div>`;
         }
-        
+
+        let nextStopLine = '';
+        if (nextStop && nextStop.label) {
+            nextStopLine = `<div class="popup-stop-routes" style="color: var(--text-muted); font-size: 0.8rem;">Next: ${nextStop.label}</div>`;
+        }
+
         marker.bindPopup(`
             <div class="popup-stop-name">${route.label || 'Unknown Route'}</div>
             <div class="popup-stop-routes">${vehicleName}</div>
+            ${nextStopLine}
             ${capacityLine}
         `);
         
@@ -1928,11 +1935,19 @@ function showMapStopInfo(stop) {
                 capacityHtml = `<span class="arrival-capacity ${capacity.className}" title="${capacity.text}">${capacity.icon}</span>`;
             }
 
+            let nextStopHtml = '';
+            if (arr.nextStop && arr.nextStop.label) {
+                nextStopHtml = `<span class="arrival-next-stop">Next: ${arr.nextStop.label}</span>`;
+            }
+
             return `
                 <div class="arrival-row">
-                    <div class="route-badge" style="background: ${color}20">
-                        <span class="dot" style="background: ${color}"></span>
-                        <span class="name">${arr.route.label}</span>
+                    <div class="arrival-route-info">
+                        <div class="route-badge" style="background: ${color}20">
+                            <span class="dot" style="background: ${color}"></span>
+                            <span class="name">${arr.route.label}</span>
+                        </div>
+                        ${nextStopHtml}
                     </div>
                     <div class="arrival-info">
                         ${capacityHtml}
