@@ -46,7 +46,7 @@ cd BoilerBus
 python server.py
 
 # If you are working with the app after hours, you can spoof the time received by the app and return fake data for development
-python server.py --mock -- time 14:00
+python server.py --mock --time 14:00
 
 # Open http://localhost:8085
 ```
