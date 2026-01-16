@@ -45,6 +45,9 @@ cd BoilerBus
 # Start the development server (includes CORS proxy)
 python server.py
 
+# If you are working with the app after hours, you can spoof the time received by the app and return fake data for development
+python server.py --mock -- time 14:00
+
 # Open http://localhost:8085
 ```
 
