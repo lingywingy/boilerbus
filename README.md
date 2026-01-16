@@ -2,7 +2,9 @@
 
 A Progressive Web App (PWA) for real-time Purdue University bus tracking. View nearby stops, live ETAs, bus locations on an interactive map, and get walking directions.
 
-I really dislike the official bus app, so I decided to make my own. The API endpoints for bus tracking and route info don't require any authentication to poll and I was able to figure it out with some poking. It seemed to me like they intentionally designed it to be as confusing and slow to navigate as possible, and I really hated how you had to use your Purdue login just to see where the bus is.
+I really dislike the official bus app, so I decided to reverse engineer the API endpoints for bus tracking and route info and make my own frontend. 
+
+It felt like they intentionally designed it to be as confusing and slow to navigate as possible, requiring you to log in to your Purdue account and go through MFA just to check when the bus is coming.
 
 > **Disclaimer:** This project is **NOT-AFFILIATED** with or sponsored by Purdue University, CityBus, or Liftango.
 
